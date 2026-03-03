@@ -1,3 +1,7 @@
+# Dependencies
+
+Tensorflow
+
 # Sign Language Glove Gesture Recognition
 
 This repository contains example code for building machine‑learning models that classify hand gestures captured by a sensor glove.  The glove uses resistive yarn sensors sewn into the fingers to measure bend, producing a time‑series of values for each sensor.  The models in this project convert sequences of normalised sensor readings into gesture labels and can be trained on user‑supplied datasets.
