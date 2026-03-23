@@ -18,8 +18,98 @@ windows of normalised data.
 
 from __future__ import annotations
 
+import csv
+import os
+from pathlib import Path
+
 import numpy as np
 from typing import Iterable, Tuple
+
+
+def load_sample(file_path: str, ignore_time: bool = True) -> np.ndarray:
+    """Load a gesture sample from .txt or .csv into a NumPy array.
+
+    For .txt files: whitespace or comma separated numeric values; no header.
+    For .csv files: header row may be present. If it contains a "time" column,
+    that column will be ignored by default.
+
+    Parameters
+    ----------
+    file_path : str
+        Path to the sample file.
+    ignore_time : bool, default True
+        If True, drop the first column if named "time" (or first numeric
+        column in CSV with 10 columns for time + 9 sensors).
+
+    Returns
+    -------
+    np.ndarray
+        Array of shape (timesteps, sensors).
+    """
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Sample file not found: {file_path}")
+
+    if path.suffix.lower() == ".csv":
+        # Use csv module for robust parsing and optional header handling
+        with path.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.reader(f)
+            rows = [row for row in reader if row and not row[0].strip().startswith("#")]
+
+        if not rows:
+            return np.empty((0, 0), dtype=np.float32)
+
+        # Detect header row with non-numeric content
+        header = rows[0]
+        has_header = any(not cell.replace(".", "", 1).replace("-", "", 1).isdigit() for cell in header)
+        data_rows = rows[1:] if has_header else rows
+
+        parsed = []
+        for row in data_rows:
+            # for CSV we can support random separators that are normalized by csv.reader
+            row = [cell.strip() for cell in row if cell.strip() != ""]
+            if not row:
+                continue
+            try:
+                parsed.append([float(x) for x in row])
+            except ValueError:
+                # ignore malformed rows
+                continue
+
+        if not parsed:
+            return np.empty((0, 0), dtype=np.float32)
+
+        arr = np.array(parsed, dtype=np.float32)
+
+        if ignore_time and arr.shape[1] >= 2:
+            colnames = [c.strip().lower() for c in header] if has_header else []
+            time_column = None
+            if colnames and "time" in colnames:
+                time_column = colnames.index("time")
+            elif arr.shape[1] == 10:
+                time_column = 0
+
+            if time_column is not None and time_column < arr.shape[1]:
+                arr = np.delete(arr, time_column, axis=1)
+
+        return arr
+
+    # default: text file
+    data = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [p for p in line.replace(",", " ").split() if p]
+            try:
+                row = [float(x) for x in parts]
+                data.append(row)
+            except ValueError:
+                continue
+
+    return np.array(data, dtype=np.float32)
+
 
 def sliding_windows(data: np.ndarray, window_size: int, step_size: int) -> Iterable[np.ndarray]:
     """Yield overlapping windows from a 2D array.

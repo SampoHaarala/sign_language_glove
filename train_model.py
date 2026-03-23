@@ -57,35 +57,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def load_sample(file_path: str) -> np.ndarray:
-    """Load a single sample file into a 2D NumPy array.
+    """Proxy loader to feature_extractor.load_sample."""
+    return feature_extractor.load_sample(file_path, ignore_time=True)
 
-    Each line in the file should contain sensor readings separated by
-    whitespace or commas. Lines with inconsistent lengths are skipped.
-
-    Parameters
-    ----------
-    file_path : str
-        Path to the sample file.
-
-    Returns
-    -------
-    np.ndarray
-        Array of shape (timesteps, sensors).
-    """
-    data = []
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            # split on whitespace or comma
-            parts = [p for p in line.replace(',', ' ').split() if p]
-            try:
-                row = [float(x) for x in parts]
-                data.append(row)
-            except ValueError:
-                continue
-    return np.array(data, dtype=np.float32)
 
 def load_dataset(directory: str) -> Tuple[List[np.ndarray], List[str]]:
     """Load all samples and labels from a directory.
@@ -105,7 +79,7 @@ def load_dataset(directory: str) -> Tuple[List[np.ndarray], List[str]]:
     samples = []
     labels = []
     for fname in os.listdir(directory):
-        if not fname.endswith('.txt'):
+        if not (fname.endswith('.txt') or fname.endswith('.csv')):
             continue
         path = os.path.join(directory, fname)
         # label is text after last '-'
@@ -113,7 +87,7 @@ def load_dataset(directory: str) -> Tuple[List[np.ndarray], List[str]]:
             label = fname.rsplit('-', 1)[1].rsplit('.', 1)[0]
         except IndexError:
             continue
-        samples.append(load_sample(path))
+        samples.append(feature_extractor.load_sample(path, ignore_time=True))
         labels.append(label)
     return samples, labels
 
