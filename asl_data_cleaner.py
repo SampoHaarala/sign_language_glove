@@ -382,22 +382,58 @@ def clean_dataset(input_dir: Path, reference_dir: Path, output_dir: Path, min_va
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Clean ASL gesture recordings by filtering low quality samples.")
-    parser.add_argument("--input", dest="input_dir", type=str, required=True, help="Path to the raw session directory")
+    parser.add_argument("--input", dest="input_dir", type=str, default="", help="Path to a single raw session directory")
+    parser.add_argument("--batch_input", dest="batch_input_dir", type=str, default="", help="Path to a parent directory containing multiple test folders to process")
     parser.add_argument("--reference", dest="reference_dir", type=str, default="", help="Directory of clean reference samples")
-    parser.add_argument("--output", dest="output_dir", type=str, required=True, help="Directory to write cleaned data")
+    parser.add_argument("--output", dest="output_dir", type=str, default="", help="Directory to write cleaned data (for single input mode)")
+    parser.add_argument("--batch_output", dest="batch_output_dir", type=str, default="", help="Parent directory for batch output (for batch mode)")
     parser.add_argument("--min_variation", type=float, default=0.05, help="Minimum mean absolute variation across sensors (default 0.05)")
     parser.add_argument("--constant_tol", type=float, default=1e-6, help="Variance threshold to detect constant sensors (default 1e-6)")
     parser.add_argument("--length_tol", type=float, default=0.25, help="Allowed fractional deviation from reference length (default 0.25)")
     parser.add_argument("--distance_threshold", type=float, default=10.0, help="Maximum z-score distance from reference features (default 10.0)")
     args = parser.parse_args()
-    input_dir = Path(args.input_dir)
+    
     reference_dir = Path(args.reference_dir) if args.reference_dir else Path()
-    output_dir = Path(args.output_dir)
-    clean_dataset(input_dir, reference_dir, output_dir,
-                  min_variation=args.min_variation,
-                  constant_tol=args.constant_tol,
-                  length_tol=args.length_tol,
-                  distance_threshold=args.distance_threshold)
+    
+    # Batch mode
+    if args.batch_input_dir:
+        batch_input = Path(args.batch_input_dir)
+        batch_output = Path(args.batch_output_dir) if args.batch_output_dir else batch_input.parent / f"{batch_input.name}_cleaned"
+        
+        if not batch_input.exists():
+            print(f"Error: batch input directory {batch_input} does not exist.")
+            return
+        
+        print(f"Starting batch processing of {batch_input}…")
+        subdirs = [d for d in batch_input.iterdir() if d.is_dir() and d.name != "discarded"]
+        if not subdirs:
+            print("No subdirectories found in batch input directory.")
+            return
+        
+        print(f"Found {len(subdirs)} subdirectories to process.")
+        for i, subdir in enumerate(subdirs, 1):
+            output_subdir = batch_output / subdir.name
+            print(f"\n[{i}/{len(subdirs)}] Processing {subdir.name}…")
+            clean_dataset(subdir, reference_dir, output_subdir,
+                         min_variation=args.min_variation,
+                         constant_tol=args.constant_tol,
+                         length_tol=args.length_tol,
+                         distance_threshold=args.distance_threshold)
+        print(f"\nBatch processing complete. Cleaned data in {batch_output}")
+    
+    # Single directory mode
+    elif args.input_dir and args.output_dir:
+        input_dir = Path(args.input_dir)
+        output_dir = Path(args.output_dir)
+        clean_dataset(input_dir, reference_dir, output_dir,
+                     min_variation=args.min_variation,
+                     constant_tol=args.constant_tol,
+                     length_tol=args.length_tol,
+                     distance_threshold=args.distance_threshold)
+    
+    else:
+        print("Error: provide either --input and --output for single mode, or --batch_input for batch mode.")
+        parser.print_help()
 
 
 if __name__ == "__main__":

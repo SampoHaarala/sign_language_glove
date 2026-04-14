@@ -25,12 +25,12 @@
 #include "tensorflow/lite/version.h"
 
 // Configuration parameters (must match training)
-constexpr int kNumSensors = 5;      // update with actual number of glove sensors
+constexpr int kNumSensors = 9;      // update with actual number of glove sensors
 constexpr int kWindowSize = 32;     // sliding window length used during training
-constexpr int kNumClasses = 10;     // number of gesture classes
+constexpr int kNumClasses = 26;     // number of gesture classes (A-Z)
 
-// ADC pins for sensors (update according to wiring)
-const int sensorPins[kNumSensors] = {34, 35, 32, 33, 36};
+// ADC pins for XIAO ESP32 S3 sensors (GPIO numbers matching data collection)
+const int sensorPins[kNumSensors] = {1, 2, 3, 4, 5, 6, 9, 10, 11};
 
 // Circular buffer to store recent readings
 float sensorBuffer[kWindowSize][kNumSensors];
@@ -46,10 +46,11 @@ static tflite::MicroInterpreter* interpreter = nullptr;
 constexpr int kTensorArenaSize = 16 * 1024;
 static uint8_t tensorArena[kTensorArenaSize];
 
-// Label names corresponding to output indices
+// Label names corresponding to output indices (A-Z)
 const char* gestureLabels[kNumClasses] = {
-  "gesture0", "gesture1", "gesture2", "gesture3", "gesture4",
-  "gesture5", "gesture6", "gesture7", "gesture8", "gesture9"
+  "A", "B", "C", "D", "E", "F", "G", "H", "I", "J",
+  "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T",
+  "U", "V", "W", "X", "Y", "Z"
 };
 
 void setup() {

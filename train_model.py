@@ -61,15 +61,18 @@ def load_sample(file_path: str) -> np.ndarray:
     return feature_extractor.load_sample(file_path, ignore_time=True)
 
 
-def load_dataset(directory: str) -> Tuple[List[np.ndarray], List[str]]:
+def load_dataset(directory: str, num_letters: int | None = None) -> Tuple[List[np.ndarray], List[str]]:
     """Load all samples and labels from a directory.
 
-    Filenames must follow the pattern ``<sampleId>-<label>.txt``.
+    Filenames must follow the pattern ``<sampleId>-<label>.txt`` or ``<sampleId>-<label>-<trial>.csv``.
+    Recursively scans all subdirectories.
 
     Parameters
     ----------
     directory : str
         Directory containing sample files.
+    num_letters : int | None
+        If specified, limit to the first N letters alphabetically.
 
     Returns
     -------
@@ -78,17 +81,42 @@ def load_dataset(directory: str) -> Tuple[List[np.ndarray], List[str]]:
     """
     samples = []
     labels = []
-    for fname in os.listdir(directory):
-        if not (fname.endswith('.txt') or fname.endswith('.csv')):
-            continue
-        path = os.path.join(directory, fname)
-        # label is text after last '-'
-        try:
-            label = fname.rsplit('-', 1)[1].rsplit('.', 1)[0]
-        except IndexError:
-            continue
-        samples.append(feature_extractor.load_sample(path, ignore_time=True))
-        labels.append(label)
+    for root, dirs, files in os.walk(directory):
+        for fname in files:
+            if not (fname.endswith('.txt') or fname.endswith('.csv')):
+                continue
+            path = os.path.join(root, fname)
+            # Extract label: for new format <subject>-<label>-<trial>.ext, label is second-to-last
+            # For old format <id>-<label>.ext, label is last part
+            try:
+                parts = fname.rsplit('.', 1)[0].split('-')
+                if len(parts) >= 3:
+                    # New format: subject-label-trial
+                    label = parts[-2]
+                elif len(parts) == 2:
+                    # Old format: id-label
+                    label = parts[-1]
+                else:
+                    continue
+            except IndexError:
+                continue
+            samples.append(feature_extractor.load_sample(path, ignore_time=True))
+            labels.append(label)
+    
+    # Filter to limit number of letters if specified
+    if num_letters is not None:
+        unique_labels = sorted(set(labels))
+        selected_labels = set(unique_labels[:num_letters])
+        filtered_samples = []
+        filtered_labels = []
+        for sample, label in zip(samples, labels):
+            if label in selected_labels:
+                filtered_samples.append(sample)
+                filtered_labels.append(label)
+        samples = filtered_samples
+        labels = filtered_labels
+        logger.info("Limited to %d letters: %s", num_letters, sorted(selected_labels))
+    
     return samples, labels
 
 def prepare_data_for_classical(samples: List[np.ndarray], labels: List[str], window_size: int, step_size: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -168,9 +196,9 @@ def prepare_data_for_deep(samples: List[np.ndarray], labels: List[str], window_s
 
 def main(args: argparse.Namespace) -> None:
     logger.info("Loading datasets...")
-    train_samples, train_labels = load_dataset(args.train_dir)
-    val_samples, val_labels = load_dataset(args.val_dir) if args.val_dir else ([], [])
-    test_samples, test_labels = load_dataset(args.test_dir) if args.test_dir else ([], [])
+    train_samples, train_labels = load_dataset(args.train_dir, args.num_letters)
+    val_samples, val_labels = load_dataset(args.val_dir, args.num_letters) if args.val_dir else ([], [])
+    test_samples, test_labels = load_dataset(args.test_dir, args.num_letters) if args.test_dir else ([], [])
     logger.info("Loaded %d training samples, %d validation samples, %d test samples", len(train_samples), len(val_samples), len(test_samples))
 
     if args.model == 'random_forest':
@@ -258,7 +286,7 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=20, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for deep models')
     parser.add_argument('--save_weights', help='Path to save trained model weights')
-    parser.add_argument('--load_weights', help='Optional path to load existing weights')
+    parser.add_argument('--num_letters', type=int, help='Limit training to the first N letters alphabetically (A, B, C, ...). If not specified, uses all available letters.')
 
     args = parser.parse_args()
     main(args)

@@ -1,42 +1,27 @@
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);  // Match Python default baud rate
 }
+
+// Use the same ADC pins as your original code, but with correct GPIO mapping for XIAO ESP32 S3
+const int sensorPins[9] = {1, 2, 3, 4, 5, 6, 9, 10, 11};  // GPIO numbers for A0, A1, A2, A3, A4, A5, A8, A9, A10
 
 static int counter = 0;
 
 void loop() {
-  pinMode(3, OUTPUT);
-  pinMode(4, OUTPUT);
-  pinMode(5, OUTPUT);
+  // Read 9 sensor values
+  int sensorValues[9];
 
-  // int normalised = value * 8 - 15000;
+  for (int i = 0; i < 9; i++) {
+    sensorValues[i] = analogRead(sensorPins[i]);
+  }
 
-#define READ_FINGER(n) analogRead(n)
+  // Send data as comma-separated values (9 sensors as expected by Python)
+  Serial.print(counter++);
+  for (int i = 0; i < 9; i++) {
+    Serial.print(",");
+    Serial.print(sensorValues[i]);
+  }
+  Serial.println();
 
-#define SCALE(v, o, n) ((v - o) * n)
-
-  digitalWrite(D3, HIGH);
-  digitalWrite(D4, HIGH);
-  digitalWrite(D5, HIGH);
-
-  Serial.printf(
-    "%d,%d,%d,%d,%d,%d\n",
-    counter++,
-    // SCALE(READ_FINGER(A0), 0, 1),
-    SCALE(READ_FINGER(A1), 0, 1),
-    SCALE(READ_FINGER(A2), 0, 1),
-    SCALE(READ_FINGER(A3), 0, 1),
-    SCALE(READ_FINGER(A4), 0, 1),
-    SCALE(READ_FINGER(A5), 0, 1)
-  );
-
-  delay(50);
-}
-
-int readFinger(int n) {
-  digitalWrite(n + 3, HIGH);
-  int res = analogRead(n);
-  digitalWrite(n + 3, LOW);
-
-  return res;
+  delay(50);  // 20Hz sampling rate
 }

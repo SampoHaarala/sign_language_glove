@@ -48,8 +48,8 @@ indicates progress.  While recording the user sees a countdown, then
 the sensor values are captured for three seconds and written to a
 CSV file.
 
-Note: This script assumes that the ESP32 transmits nine comma‑separated
-sensor readings per line at a regular sampling rate.  Modify the
+Note: This script assumes that the ESP32 transmits ten comma‑separated
+sensor readings per line (counter + 9 sensor values) at a regular sampling rate.  Modify the
 ``read_sensor_line`` function if your microcontroller uses a different
 format.
 
@@ -77,7 +77,7 @@ except ImportError:
 
 
 def list_serial_ports() -> list[str]:
-    """Return a list of available serial port names.
+    """Return a list of available serial port names. 
 
     This helper enumerates connected serial devices using PySerial.  If
     PySerial is not available a fallback empty list is returned.
@@ -129,15 +129,16 @@ class SensorReader(threading.Thread):
 def read_sensor_line(line: str) -> list[float] | None:
     """Parse a line of sensor data into a list of floats.
 
-    The expected format is nine comma‑separated numerical values.  Invalid
-    lines return ``None``.  Adjust this function if your ESP32 uses a
-    different output format.
+    The expected format is ten comma‑separated numerical values (counter + 9 sensors).
+    Returns the 9 sensor values, ignoring the counter. Invalid lines return ``None``.
+    Adjust this function if your ESP32 uses a different output format.
     """
     parts = [p.strip() for p in line.split(",")]
-    if len(parts) != 9:
+    if len(parts) != 10:
         return None
     try:
-        values = [float(p) for p in parts]
+        # Skip the counter (first value) and take the 9 sensor values
+        values = [float(p) for p in parts[1:]]
         return values
     except ValueError:
         return None
