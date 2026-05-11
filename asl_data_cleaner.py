@@ -79,6 +79,7 @@ import shutil
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import gesture_subset_abcd_y as gesture_subset
 import numpy as np
 
 
@@ -168,7 +169,7 @@ def extract_features(sample: np.ndarray) -> np.ndarray:
     return np.concatenate([means, stds])
 
 
-def build_reference_stats(reference_dir: Path) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, float]]:
+def build_reference_stats(reference_dir: Path, allowed_labels: list[str] | None = None) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, float]]:
     """Compute per‑label reference statistics from a directory of good samples.
 
     Scans all files in ``reference_dir`` recursively.  For each file it
@@ -191,6 +192,7 @@ def build_reference_stats(reference_dir: Path) -> Tuple[Dict[str, np.ndarray], D
     feature_acc: Dict[str, List[np.ndarray]] = {}
     length_acc: Dict[str, List[int]] = {}
 
+    allowed_set = set(allowed_labels) if allowed_labels is not None else None
     for file_path in reference_dir.rglob("*"):
         if not file_path.is_file():
             continue
@@ -198,6 +200,8 @@ def build_reference_stats(reference_dir: Path) -> Tuple[Dict[str, np.ndarray], D
             continue
         label = infer_label_from_filename(file_path.name)
         if label is None:
+            continue
+        if allowed_set is not None and label not in allowed_set:
             continue
         sample = parse_sensor_file(file_path)
         if sample is None:
@@ -315,7 +319,8 @@ def assess_sample(sample: np.ndarray, label: str | None, ref_mean: Dict[str, np.
 
 
 def clean_dataset(input_dir: Path, reference_dir: Path, output_dir: Path, min_variation: float,
-                  constant_tol: float, length_tol: float, distance_threshold: float) -> None:
+                  constant_tol: float, length_tol: float, distance_threshold: float,
+                  allowed_labels: list[str] | None = None) -> None:
     """Clean a dataset directory by removing low quality samples.
 
     Parameters
@@ -339,11 +344,17 @@ def clean_dataset(input_dir: Path, reference_dir: Path, output_dir: Path, min_va
         Fractional tolerance on sequence length compared to reference.
     distance_threshold : float
         Maximum allowed distance from reference features.
+    allowed_labels : list[str] | None
+        If specified, only samples with these labels are cleaned and retained.
     """
+    if allowed_labels is None:
+        allowed_labels = gesture_subset.get_reduced_gesture_set()
+        print(f"Cleaning gesture subset: {', '.join(allowed_labels)}")
+    allowed_set = set(allowed_labels)
     # Build reference statistics
     if reference_dir.exists():
         print(f"Building reference statistics from {reference_dir}…")
-        ref_mean, ref_std, ref_len = build_reference_stats(reference_dir)
+        ref_mean, ref_std, ref_len = build_reference_stats(reference_dir, allowed_labels)
     else:
         ref_mean, ref_std, ref_len = {}, {}, {}
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -353,6 +364,9 @@ def clean_dataset(input_dir: Path, reference_dir: Path, output_dir: Path, min_va
     # Iterate over files in input_dir recursively
     for file_path in input_dir.rglob("*.csv"):
         label = infer_label_from_filename(file_path.name)
+        if label is None or label not in allowed_set:
+            log_lines.append(f"SKIP: {file_path.relative_to(input_dir)} → label={label!r} not in allowed subset")
+            continue
         sample = parse_sensor_file(file_path)
         if sample is None:
             reason = "could not parse"
@@ -391,6 +405,7 @@ def main() -> None:
     parser.add_argument("--constant_tol", type=float, default=1e-6, help="Variance threshold to detect constant sensors (default 1e-6)")
     parser.add_argument("--length_tol", type=float, default=0.25, help="Allowed fractional deviation from reference length (default 0.25)")
     parser.add_argument("--distance_threshold", type=float, default=10.0, help="Maximum z-score distance from reference features (default 10.0)")
+    parser.add_argument("--letters", help="Comma-separated gesture labels to clean, e.g. A,B,C,D,Y. Defaults to the reduced gesture subset.")
     args = parser.parse_args()
     
     reference_dir = Path(args.reference_dir) if args.reference_dir else Path()
@@ -411,6 +426,9 @@ def main() -> None:
             return
         
         print(f"Found {len(subdirs)} subdirectories to process.")
+        allowed_labels = gesture_subset.parse_label_list(args.letters)
+        if allowed_labels is None:
+            allowed_labels = gesture_subset.get_reduced_gesture_set()
         for i, subdir in enumerate(subdirs, 1):
             output_subdir = batch_output / subdir.name
             print(f"\n[{i}/{len(subdirs)}] Processing {subdir.name}…")
@@ -418,18 +436,23 @@ def main() -> None:
                          min_variation=args.min_variation,
                          constant_tol=args.constant_tol,
                          length_tol=args.length_tol,
-                         distance_threshold=args.distance_threshold)
+                         distance_threshold=args.distance_threshold,
+                         allowed_labels=allowed_labels)
         print(f"\nBatch processing complete. Cleaned data in {batch_output}")
     
     # Single directory mode
     elif args.input_dir and args.output_dir:
         input_dir = Path(args.input_dir)
         output_dir = Path(args.output_dir)
+        allowed_labels = gesture_subset.parse_label_list(args.letters)
+        if allowed_labels is None:
+            allowed_labels = gesture_subset.get_reduced_gesture_set()
         clean_dataset(input_dir, reference_dir, output_dir,
                      min_variation=args.min_variation,
                      constant_tol=args.constant_tol,
                      length_tol=args.length_tol,
-                     distance_threshold=args.distance_threshold)
+                     distance_threshold=args.distance_threshold,
+                     allowed_labels=allowed_labels)
     
     else:
         print("Error: provide either --input and --output for single mode, or --batch_input for batch mode.")

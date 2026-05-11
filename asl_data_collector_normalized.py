@@ -58,6 +58,8 @@ format.
 
 """
 
+from __future__ import annotations
+
 import argparse
 import os
 import random
@@ -68,6 +70,7 @@ from datetime import datetime
 from pathlib import Path
 from queue import Queue, Empty
 
+import gesture_subset_abcd_y as gesture_subset
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from PIL import Image, ImageTk
@@ -99,7 +102,7 @@ class SensorReader(threading.Thread):
     main thread via an exception attribute.
     """
 
-    def __init__(self, ser: serial.Serial):
+    def __init__(self, ser):
         super().__init__(daemon=True)
         self.ser = ser
         self.queue: Queue[str] = Queue()
@@ -137,7 +140,7 @@ def read_sensor_line(line: str) -> list[float] | None:
     Adjust this function if your ESP32 uses a different output format.
     """
     parts = [p.strip() for p in line.split(",")]
-    if len(parts) != 10:
+    if len(parts) != 6:
         return None
     try:
         # Skip the counter (first value) and take the 9 sensor values
@@ -148,7 +151,11 @@ def read_sensor_line(line: str) -> list[float] | None:
 
 
 def normalize_data(rows: list[list[float]]) -> list[list[float]]:
-    """Normalize sensor data to [0, 1] range based on min/max per sensor.
+    """Normalize sensor data to [0, 1] using a fixed ADC range.
+
+    The values are assumed to be raw ADC readings in the interval
+    [0, 4065]. This fixed-range normalization helps preserve amplitude
+    differences between sensors while mapping everything into [0, 1].
 
     Args:
         rows: List of sensor readings, each row is [sensor1, sensor2, ..., sensor9]
@@ -159,23 +166,16 @@ def normalize_data(rows: list[list[float]]) -> list[list[float]]:
     if not rows:
         return rows
 
-    # Transpose to get columns (sensors)
-    columns = list(zip(*rows))
+    max_adc = 4065.0
+    normalized_rows: list[list[float]] = []
+    for row in rows:
+        normalized_row = []
+        for val in row:
+            clipped = max(0.0, min(val, max_adc))
+            normalized_row.append(clipped / max_adc)
+        normalized_rows.append(normalized_row)
 
-    normalized_columns = []
-    for col in columns:
-        min_val = min(col)
-        max_val = max(col)
-        if max_val == min_val:
-            # All values are the same, normalize to 0.5 or keep as is
-            normalized_col = [0.5 for _ in col]
-        else:
-            normalized_col = [(val - min_val) / (max_val - min_val) for val in col]
-        normalized_columns.append(normalized_col)
-
-    # Transpose back to rows
-    normalized_rows = list(zip(*normalized_columns))
-    return [list(row) for row in normalized_rows]
+    return normalized_rows
 
 
 class DataCollectorGUI:
@@ -187,12 +187,13 @@ class DataCollectorGUI:
     sensor reader thread to obtain incoming data.
     """
 
-    def __init__(self, ser: serial.Serial, subject_id: str, session_dir: Path, repeat_count: int, record_seconds: float = 3.0):
+    def __init__(self, ser, subject_id: str, session_dir: Path, repeat_count: int, record_seconds: float = 3.0, letters=None):
         self.ser = ser
         self.subject_id = subject_id
         self.session_dir = session_dir
         self.repeat_count = repeat_count
         self.record_seconds = record_seconds
+        self.letters = letters if letters is not None else gesture_subset.get_reduced_gesture_set()
         self.root = tk.Tk()
         self.root.title("ASL Data Collector (Normalized)")
         self.root.geometry("600x700")
@@ -204,10 +205,9 @@ class DataCollectorGUI:
         self.images: dict[str, ImageTk.PhotoImage] = {}
         self._load_images()
         # Prepare order of letters
-        letters = [chr(ord("A") + i) for i in range(26)]
         self.samples: list[tuple[str, int]] = []
         for i in range(repeat_count):
-            for letter in letters:
+            for letter in self.letters:
                 self.samples.append((letter, i + 1))
         random.shuffle(self.samples)
         self.current_index = -1
@@ -220,10 +220,24 @@ class DataCollectorGUI:
         self.status_label.pack(pady=10)
         self.progress_label = tk.Label(self.root, text="")
         self.progress_label.pack()
+        self.plot_canvas = tk.Canvas(self.root, width=560, height=240, bg="white", highlightthickness=1, highlightbackground="black")
+        self.plot_canvas.pack(pady=10)
+        self.plot_canvas.create_text(280, 120, text="Sensor timeline will appear here after each recording.", fill="gray", font=("Arial", 10))
         self.start_button = tk.Button(self.root, text="Start Session", command=self.on_start_button, font=("Arial", 14))
         self.start_button.pack(pady=10)
         self.current_letter: str = ""
         self.current_trial: int = 0
+        self.sensor_colors = [
+            "#1f77b4",
+            "#ff7f0e",
+            "#2ca02c",
+            "#d62728",
+            "#9467bd",
+            "#8c564b",
+            "#e377c2",
+            "#7f7f7f",
+            "#bcbd22",
+        ]
         # Sensor reader thread
         self.reader = SensorReader(ser)
         self.reader.start()
@@ -237,7 +251,7 @@ class DataCollectorGUI:
         the letter drawn as text will be generated dynamically.
         """
         images_dir = Path(__file__).resolve().parent / "images"
-        for letter in [chr(ord("A") + i) for i in range(26)]:
+        for letter in self.letters:
             image_path = images_dir / f"{letter}.png"
             if image_path.exists():
                 try:
@@ -276,6 +290,56 @@ class DataCollectorGUI:
             except Exception:
                 pass
             self.images[letter] = ImageTk.PhotoImage(placeholder, master=self.root)
+
+    def _clear_plot(self) -> None:
+        """Reset the timeline plot area to a neutral placeholder state."""
+        self.plot_canvas.delete("all")
+        self.plot_canvas.create_text(
+            280,
+            120,
+            text="Sensor timeline will appear here after each recording.",
+            fill="gray",
+            font=("Arial", 10),
+        )
+
+    def plot_sensor_timeline(self, data: list[list[float]], timestamps: list[float]) -> None:
+        """Draw the normalized sensor values as a time-series chart."""
+        self._clear_plot()
+        if not data or not timestamps:
+            return
+
+        width = int(self.plot_canvas.cget("width"))
+        height = int(self.plot_canvas.cget("height"))
+        margin = 40
+        plot_width = width - margin * 2
+        plot_height = height - margin * 2
+
+        # Draw border and grid lines
+        self.plot_canvas.create_rectangle(margin, margin, width - margin, height - margin, outline="#444")
+        self.plot_canvas.create_line(margin, margin + plot_height / 2, width - margin, margin + plot_height / 2, fill="#ddd")
+        self.plot_canvas.create_line(margin + plot_width / 2, margin, margin + plot_width / 2, height - margin, fill="#ddd")
+        self.plot_canvas.create_text(margin - 10, margin, text="1.0", anchor="e", fill="#444", font=("Arial", 8))
+        self.plot_canvas.create_text(margin - 10, height - margin, text="0.0", anchor="e", fill="#444", font=("Arial", 8))
+        self.plot_canvas.create_text(width - margin, height - 10, text=f"{timestamps[-1]:.2f}s", anchor="e", fill="#444", font=("Arial", 8))
+        self.plot_canvas.create_text(margin, height - 10, text="0.0s", anchor="w", fill="#444", font=("Arial", 8))
+        self.plot_canvas.create_text(width / 2, 15, text="Sensor outputs over time", fill="#000", font=("Arial", 10, "bold"))
+
+        time_min = timestamps[0]
+        time_max = timestamps[-1] if timestamps[-1] > time_min else self.record_seconds
+        x_scale = plot_width / (time_max - time_min if time_max > time_min else 1.0)
+
+        for sensor_index in range(len(data[0])):
+            points = []
+            for t, row in zip(timestamps, data):
+                x = margin + (t - time_min) * x_scale
+                y = height - margin - row[sensor_index] * plot_height
+                points.extend((x, y))
+            self.plot_canvas.create_line(*points, fill=self.sensor_colors[sensor_index % len(self.sensor_colors)], width=1.5)
+
+        self.plot_canvas.create_text(width - margin + 5, margin + 8, text="1.0", anchor="w", fill="#000", font=("Arial", 8))
+        self.plot_canvas.create_text(width - margin + 5, height - margin - 8, text="0.0", anchor="w", fill="#000", font=("Arial", 8))
+        self.plot_canvas.create_text(width / 2, height - 20, text="Time (seconds)", fill="#000", font=("Arial", 8))
+        self.plot_canvas.create_text(60, margin + 10, text="Normalized sensor values", fill="#000", font=("Arial", 8), anchor="w")
 
     def on_close(self) -> None:
         """Handle window close event by stopping the sensor reader."""
@@ -351,6 +415,7 @@ class DataCollectorGUI:
                     row = ",".join([f"{tstamp:.3f}"] + [f"{v:.6f}" for v in values])
                     f.write(row + "\n")
             self.status_label.config(text=f"Saved {output_path.name} (normalized)")
+            self.plot_sensor_timeline(normalized_data, timestamps)
         except Exception as exc:  # noqa: BLE001
             self.status_label.config(text=f"Failed to save {output_path.name}: {exc}")
         # Move on
@@ -366,6 +431,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", help="Serial port for ESP32 (e.g. COM3 or /dev/ttyUSB0)")
     parser.add_argument("--subject", help="Identifier for the subject (e.g. participant name)")
     parser.add_argument("--repeats", type=int, default=2, help="Number of times to repeat the alphabet (default 2)")
+    parser.add_argument("--letters", help="Comma-separated gesture labels to record, e.g. A,B,C,D,Y. Defaults to the reduced gesture subset.")
     parser.add_argument("--session", required=True, help="Directory to store session data")
     parser.add_argument("--baud", type=int, default=115200, help="Baud rate for serial connection (default 115200)")
     return parser.parse_args()
@@ -387,8 +453,12 @@ def main() -> None:
     except serial.SerialException as exc:
         print(f"Could not open serial port {args.port}: {exc}")
         return
+    allowed_letters = gesture_subset.parse_label_list(args.letters)
+    if allowed_letters is None:
+        allowed_letters = gesture_subset.get_reduced_gesture_set()
+        print(f"Recording gesture subset: {', '.join(allowed_letters)}")
     # Show UI
-    gui = DataCollectorGUI(ser, args.subject, session_dir, args.repeats)
+    gui = DataCollectorGUI(ser, args.subject, session_dir, args.repeats, letters=allowed_letters)
     gui.run()
     # Close serial port on exit
     ser.close()

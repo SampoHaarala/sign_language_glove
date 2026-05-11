@@ -55,6 +55,8 @@ format.
 
 """
 
+from __future__ import annotations
+
 import argparse
 import os
 import random
@@ -65,6 +67,7 @@ from datetime import datetime
 from pathlib import Path
 from queue import Queue, Empty
 
+import gesture_subset_abcd_y as gesture_subset
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from PIL import Image, ImageTk
@@ -96,7 +99,7 @@ class SensorReader(threading.Thread):
     main thread via an exception attribute.
     """
 
-    def __init__(self, ser: serial.Serial):
+    def __init__(self, ser):
         super().__init__(daemon=True)
         self.ser = ser
         self.queue: Queue[str] = Queue()
@@ -153,7 +156,7 @@ class DataCollectorGUI:
     sensor reader thread to obtain incoming data.
     """
 
-    def __init__(self, ser: serial.Serial, subject_id: str, session_dir: Path, repeat_count: int, record_seconds: float = 3.0):
+    def __init__(self, ser, subject_id: str, session_dir: Path, repeat_count: int, record_seconds: float = 3.0, letters=None):
         self.ser = ser
         self.subject_id = subject_id
         self.session_dir = session_dir
@@ -167,13 +170,13 @@ class DataCollectorGUI:
         self.subject_dir = session_dir / subject_id
         self.subject_dir.mkdir(parents=True, exist_ok=True)
         # Load images
+        self.letters = letters if letters is not None else gesture_subset.get_reduced_gesture_set()
         self.images: dict[str, ImageTk.PhotoImage] = {}
         self._load_images()
         # Prepare order of letters
-        letters = [chr(ord("A") + i) for i in range(26)]
         self.samples: list[tuple[str, int]] = []
         for i in range(repeat_count):
-            for letter in letters:
+            for letter in self.letters:
                 self.samples.append((letter, i + 1))
         random.shuffle(self.samples)
         self.current_index = -1
@@ -201,7 +204,7 @@ class DataCollectorGUI:
         the letter drawn as text will be generated dynamically.
         """
         images_dir = Path(__file__).resolve().parent / "images"
-        for letter in [chr(ord("A") + i) for i in range(26)]:
+        for letter in self.letters:
             image_path = images_dir / f"{letter}.png"
             if image_path.exists():
                 try:
@@ -317,6 +320,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", help="Serial port for ESP32 (e.g. COM3 or /dev/ttyUSB0)")
     parser.add_argument("--subject", help="Identifier for the subject (e.g. participant name)")
     parser.add_argument("--repeats", type=int, default=2, help="Number of times to repeat the alphabet (default 2)")
+    parser.add_argument("--letters", help="Comma-separated gesture labels to record, e.g. A,B,C,D,Y. Defaults to the reduced gesture subset.")
     parser.add_argument("--session", default=None, help="Directory to store session data (default: choose via dialog)")
     parser.add_argument("--baud", type=int, default=115200, help="Baud rate for serial connection (default 115200)")
     return parser.parse_args()
@@ -356,8 +360,12 @@ def main() -> None:
     except serial.SerialException as exc:
         print(f"Could not open serial port {args.port}: {exc}")
         return
+    allowed_letters = gesture_subset.parse_label_list(args.letters)
+    if allowed_letters is None:
+        allowed_letters = gesture_subset.get_reduced_gesture_set()
+        print(f"Recording gesture subset: {', '.join(allowed_letters)}")
     # Show UI
-    gui = DataCollectorGUI(ser, args.subject, session_dir, args.repeats)
+    gui = DataCollectorGUI(ser, args.subject, session_dir, args.repeats, letters=allowed_letters)
     gui.run()
     # Close serial port on exit
     ser.close()

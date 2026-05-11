@@ -160,8 +160,6 @@ def extract_features(window: np.ndarray) -> np.ndarray:
     For each sensor (column) in the window, compute:
       - mean
       - standard deviation
-      - minimum
-      - maximum
       - median
       - range (max - min)
       - slope (first and last value)
@@ -192,7 +190,7 @@ def extract_features(window: np.ndarray) -> np.ndarray:
         signal_range = max_val - min_val
         slope = compute_slope(col)
         rms = np.sqrt(np.mean(col**2))
-        feats.extend([mean, std, min_val, max_val, median, signal_range, slope, rms])
+        feats.extend([mean, std, median, signal_range, slope, rms])
     return np.array(feats, dtype=np.float32)
 
 def extract_features_from_sample(sample: np.ndarray, window_size: int, step_size: int) -> Tuple[np.ndarray, list[str]]:

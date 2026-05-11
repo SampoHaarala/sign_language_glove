@@ -35,6 +35,7 @@ from typing import List, Tuple
 
 # Import utility modules defined in this project
 import feature_extractor
+import gesture_subset_abcd_y as gesture_subset
 import model_utils
 
 # Try optional dependencies
@@ -61,7 +62,7 @@ def load_sample(file_path: str) -> np.ndarray:
     return feature_extractor.load_sample(file_path, ignore_time=True)
 
 
-def load_dataset(directory: str, num_letters: int | None = None) -> Tuple[List[np.ndarray], List[str]]:
+def load_dataset(directory: str, num_letters: int | None = None, allowed_labels: list[str] | None = None) -> Tuple[List[np.ndarray], List[str]]:
     """Load all samples and labels from a directory.
 
     Filenames must follow the pattern ``<sampleId>-<label>.txt`` or ``<sampleId>-<label>-<trial>.csv``.
@@ -73,6 +74,8 @@ def load_dataset(directory: str, num_letters: int | None = None) -> Tuple[List[n
         Directory containing sample files.
     num_letters : int | None
         If specified, limit to the first N letters alphabetically.
+    allowed_labels : list[str] | None
+        If specified, retain only samples with these labels.
 
     Returns
     -------
@@ -103,8 +106,19 @@ def load_dataset(directory: str, num_letters: int | None = None) -> Tuple[List[n
             samples.append(feature_extractor.load_sample(path, ignore_time=True))
             labels.append(label)
     
-    # Filter to limit number of letters if specified
-    if num_letters is not None:
+    # Filter to a selected subset of labels if requested
+    if allowed_labels is not None:
+        selected_labels = set(allowed_labels)
+        filtered_samples = []
+        filtered_labels = []
+        for sample, label in zip(samples, labels):
+            if label in selected_labels:
+                filtered_samples.append(sample)
+                filtered_labels.append(label)
+        samples = filtered_samples
+        labels = filtered_labels
+        logger.info("Filtered dataset to labels: %s", sorted(selected_labels))
+    elif num_letters is not None:
         unique_labels = sorted(set(labels))
         selected_labels = set(unique_labels[:num_letters])
         filtered_samples = []
@@ -196,9 +210,13 @@ def prepare_data_for_deep(samples: List[np.ndarray], labels: List[str], window_s
 
 def main(args: argparse.Namespace) -> None:
     logger.info("Loading datasets...")
-    train_samples, train_labels = load_dataset(args.train_dir, args.num_letters)
-    val_samples, val_labels = load_dataset(args.val_dir, args.num_letters) if args.val_dir else ([], [])
-    test_samples, test_labels = load_dataset(args.test_dir, args.num_letters) if args.test_dir else ([], [])
+    allowed_labels = gesture_subset.parse_label_list(args.letters)
+    if allowed_labels is None:
+        allowed_labels = gesture_subset.get_reduced_gesture_set()
+        logger.info("Using default reduced gesture subset: %s", allowed_labels)
+    train_samples, train_labels = load_dataset(args.train_dir, args.num_letters, allowed_labels)
+    val_samples, val_labels = load_dataset(args.val_dir, args.num_letters, allowed_labels) if args.val_dir else ([], [])
+    test_samples, test_labels = load_dataset(args.test_dir, args.num_letters, allowed_labels) if args.test_dir else ([], [])
     logger.info("Loaded %d training samples, %d validation samples, %d test samples", len(train_samples), len(val_samples), len(test_samples))
 
     if args.model == 'random_forest':
@@ -286,7 +304,8 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=20, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for deep models')
     parser.add_argument('--save_weights', help='Path to save trained model weights')
-    parser.add_argument('--num_letters', type=int, help='Limit training to the first N letters alphabetically (A, B, C, ...). If not specified, uses all available letters.')
+    parser.add_argument('--num_letters', type=int, help='Limit training to the first N letters alphabetically (A, B, C, ...). If not specified, uses the reduced label set by default.')
+    parser.add_argument('--letters', help='Comma-separated gesture labels to include, e.g. A,B,C,D,Y. Overrides --num_letters if specified.')
 
     args = parser.parse_args()
     main(args)
