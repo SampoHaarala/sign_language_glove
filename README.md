@@ -1,6 +1,6 @@
 # Dependencies
 
-Tensorflow
+Tensorflow fastapi uvicorn numpy joblib python-multipart
 
 # Sign Language Glove Gesture Recognition
 

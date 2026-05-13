@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sign Language Glove Dashboard</title>
+    <!-- Link to our stylesheet -->
+    <link rel="stylesheet" href="/static/style.css" />
+    <!-- Chart.js via CDN for plotting -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  </head>
+  <body>
+    <div id="app-container">
+      <header>
+        <h1>Sign Language Glove Live Dashboard</h1>
+      </header>
+      <main>
+        <div class="flex-row">
+          <!-- Prediction card -->
+          <div id="prediction-card" class="card prediction-card">
+            <div class="prediction-letter" id="prediction-letter">–</div>
+            <div class="confidence" id="prediction-confidence">0%</div>
+          </div>
+          <!-- Sensor value cards -->
+          <div id="sensor-cards" class="sensor-cards">
+            <!-- Individual sensor cards will be populated by app.js -->
+          </div>
+        </div>
+        <!-- Chart area -->
+        <div class="chart-container">
+          <canvas id="sensorChart"></canvas>
+        </div>
+        <!-- Probabilities list -->
+        <div id="probabilities" class="probabilities"></div>
+        <!-- Status message -->
+        <div id="status" class="status">Connecting…</div>
+      </main>
+    </div>
+    <!-- Our application script -->
+    <script src="/static/app.js"></script>
+  </body>
+</html>
