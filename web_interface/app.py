@@ -72,7 +72,7 @@ except ImportError:  # pragma: no cover
 # -----------------------------------------------------------------------------
 # Configuration constants
 #
-WINDOW_SIZE = 32  # number of samples required for a prediction
+WINDOW_SIZE = 64  # number of samples required for a prediction
 HISTORY_SIZE = 300  # length of history buffer for plotting
 NUM_SENSORS = 5  # glove sends five sensor values per line
 DEFAULT_ADC_MAX = 4065.0  # maximum ADC value for ESP32 S3
@@ -93,6 +93,27 @@ def compute_features(window: List[List[float]]) -> np.ndarray:
     means = arr.mean(axis=0)
     stds = arr.std(axis=0)
     return np.concatenate([means, stds], dtype=np.float64)
+
+
+def get_default_classes() -> List[str]:
+    """Return a default list of gesture labels.
+
+    If the project provides a `gesture_subset_abcd_y` module, use
+    its `get_reduced_gesture_set()` function.  Otherwise fall back
+    to a hardcoded list of common ASL letters.  This helper allows
+    CNN‑based models to map prediction indices back to letters when
+    the label mapping is not embedded in the model file.
+    """
+    try:
+        from gesture_subset_abcd_y import get_reduced_gesture_set  # type: ignore
+
+        classes = get_reduced_gesture_set()
+        if isinstance(classes, list) and classes:
+            return [str(c) for c in classes]
+    except Exception:
+        pass
+    # Fallback to a minimal set of letters commonly used in the project
+    return ["A", "B", "C", "D", "Y"]
 
 
 def load_calibration(calibration_file: Optional[str]) -> Tuple[List[float], List[float]]:
@@ -162,61 +183,109 @@ def normalise(values: List[float], min_vals: List[float], max_vals: List[float])
 
 
 class PredictionModel:
-    """Wrapper around a scikit‑learn classifier loaded from joblib.
+    """Wrapper around classification models for the sign language glove.
 
-    Handles loading the model from disk, preparing an index‑to‑label
-    mapping and performing predictions on feature vectors.
+    This class supports both classical scikit‑learn models (Random Forest)
+    loaded via joblib and deep learning models (CNN‑LSTM or
+    CNN‑BiLSTM) loaded via TensorFlow/Keras.  A ``model_type``
+    parameter determines which prediction pathway to use.  For
+    classical models, simple statistical features are computed from
+    the window before inference; for CNN‑based models, the raw window
+    of shape (WINDOW_SIZE, NUM_SENSORS) is passed directly to
+    ``model.predict()``.  A list of class labels must be provided
+    (either via the saved ``label_to_idx`` mapping in a joblib file
+    or explicitly) to decode indices back to gesture letters.
     """
 
-    def __init__(self, model_path: Optional[str]):
-        self.model = None  # underlying classifier
-        self.idx_to_label: Dict[int, str] = {}
-        if model_path and joblib:
+    def __init__(
+        self,
+        model_path: Optional[str],
+        model_type: str = "rf",
+        classes: Optional[List[str]] = None,
+    ) -> None:
+        self.model_type = model_type.lower()
+        self.model = None  # underlying classifier or Keras model
+        # Determine class labels
+        if classes is None:
+            classes = get_default_classes()
+        self.idx_to_label: Dict[int, str] = {idx: label for idx, label in enumerate(classes)}
+        # Load model depending on type
+        if not model_path:
+            return
+        if self.model_type == "rf":
+            # Load scikit‑learn model saved via joblib
+            if joblib is None:
+                return
             try:
                 model_data = joblib.load(model_path)
-                # The training pipeline saves a dict containing the model and label mapping
                 if isinstance(model_data, dict):
                     self.model = model_data.get("model") or model_data.get("clf")
                     label_to_idx: Optional[Dict[str, int]] = model_data.get("label_to_idx")
                     if label_to_idx:
                         self.idx_to_label = {idx: label for label, idx in label_to_idx.items()}
                 else:
-                    # The model itself may be saved directly
                     self.model = model_data
-            except Exception:  # pragma: no cover
-                # Leave the model as None on any loading error
+            except Exception:
                 self.model = None
+        elif self.model_type in ("cnn_lstm", "cnn_bilstm", "cnn", "keras"):
+            # Attempt to load a Keras model
+            try:
+                # Delay import of tensorflow to avoid unnecessary dependency if unused
+                import tensorflow as tf  # type: ignore
+
+                self.model = tf.keras.models.load_model(model_path)
+            except Exception:
+                self.model = None
+        else:
+            # Unknown model type
+            self.model = None
 
     def predict(self, window: List[List[float]]) -> Tuple[str, Dict[str, float], float]:
         """Predict the label and probabilities for the most recent window.
 
-        Returns a tuple ``(label, probability_dict, confidence)``.  If no
-        model is loaded, ``label`` will be ``"?"`` and the
-        probability dictionary will be empty.  Confidence is the
-        probability of the predicted label if available; otherwise 0.
+        Returns ``(label, probability_dict, confidence)``.  If no model is
+        loaded or inference fails, returns a placeholder label "?" and
+        empty probability dictionary with zero confidence.
         """
         if not self.model:
             return "?", {}, 0.0
-        # Compute feature vector
-        feats = compute_features(window)
-        feats = feats.reshape(1, -1)
         try:
-            # Use predict_proba if available
-            if hasattr(self.model, "predict_proba"):
-                probas = self.model.predict_proba(feats)[0]
+            if self.model_type == "rf":
+                # Compute simple statistical features and reshape
+                feats = compute_features(window)
+                feats = feats.reshape(1, -1)
+                # Use predict_proba if available
+                if hasattr(self.model, "predict_proba"):
+                    probas = self.model.predict_proba(feats)[0]
+                    pred_idx = int(np.argmax(probas))
+                    confidence = float(probas[pred_idx])
+                    label = self.idx_to_label.get(pred_idx, str(pred_idx))
+                    prob_dict: Dict[str, float] = {
+                        self.idx_to_label.get(i, str(i)): float(p)
+                        for i, p in enumerate(probas)
+                    }
+                    return label, prob_dict, confidence
+                # Fall back to predict() if no probabilities available
+                pred = self.model.predict(feats)[0]
+                label = self.idx_to_label.get(int(pred), str(pred))
+                return label, {label: 1.0}, 1.0
+            else:
+                # CNN‑based models expect a 3D tensor (batch, timesteps, sensors)
+                arr = np.asarray(window, dtype=np.float32)
+                arr = arr.reshape((1, arr.shape[0], arr.shape[1]))
+                # Predict probabilities; suppress verbose logging
+                probas = self.model.predict(arr, verbose=0)
+                # Some models return nested arrays
+                probas = np.asarray(probas).reshape(-1)
                 pred_idx = int(np.argmax(probas))
                 confidence = float(probas[pred_idx])
                 label = self.idx_to_label.get(pred_idx, str(pred_idx))
-                prob_dict: Dict[str, float] = {
+                prob_dict = {
                     self.idx_to_label.get(i, str(i)): float(p)
                     for i, p in enumerate(probas)
                 }
                 return label, prob_dict, confidence
-            # Fall back to predict if probability method is missing
-            pred = self.model.predict(feats)[0]
-            label = self.idx_to_label.get(int(pred), str(pred))
-            return label, {label: 1.0}, 1.0
-        except Exception:  # pragma: no cover
+        except Exception:
             return "?", {}, 0.0
 
 
@@ -226,7 +295,12 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
     # Prepare calibration and model
     min_vals, max_vals = load_calibration(args.calibration)
-    pred_model = PredictionModel(args.model)
+    # Determine class labels from --classes argument (comma separated) if provided
+    if args.classes:
+        class_list = [s.strip() for s in args.classes.split(",") if s.strip()]
+    else:
+        class_list = None
+    pred_model = PredictionModel(args.model, model_type=args.model_type, classes=class_list)
 
     # Application state
     app.state.min_vals = min_vals
@@ -237,6 +311,15 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     app.state.websockets: set[WebSocket] = set()
     app.state.running = True
     app.state.simulate = args.simulate
+
+    # TCP server configuration; if provided, the server will accept
+    # incoming connections from the glove over WiFi.  The
+    # network_server attribute holds the asyncio.Server instance and
+    # client_tasks stores tasks spawned for each connected client.
+    app.state.tcp_host = args.tcp_host
+    app.state.tcp_port = args.tcp_port
+    app.state.network_server = None
+    app.state.client_tasks: set[asyncio.Task] = set()
 
     # Serial connection handle stored in state
     app.state.serial = None
@@ -267,9 +350,24 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     print(f"Failed to open serial port {args.port}: {e}. Falling back to simulation.")
                     app.state.simulate = True
                     app.state.serial = None
-        # Start the reader task
         loop = asyncio.get_event_loop()
+        # Start serial/simulation reader task
         loop.create_task(serial_reader(app))
+        # Start TCP server if configured
+        if app.state.tcp_port is not None:
+            try:
+                server = await asyncio.start_server(
+                    lambda r, w: handle_client(app, r, w),
+                    host=app.state.tcp_host or "0.0.0.0",
+                    port=app.state.tcp_port,
+                )
+                app.state.network_server = server
+                # Start serving in the background
+                loop.create_task(server.serve_forever())
+                addr = ", ".join(str(sock.getsockname()) for sock in server.sockets)
+                print(f"Listening for glove TCP connections on {addr}")
+            except Exception as e:
+                print(f"Failed to start TCP server on {app.state.tcp_host}:{app.state.tcp_port}: {e}")
 
     @app.on_event("shutdown")
     async def on_shutdown() -> None:
@@ -280,6 +378,16 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 app.state.serial.close()
             except Exception:  # pragma: no cover
                 pass
+        # Shut down the TCP server and any client reader tasks
+        if app.state.network_server:
+            try:
+                app.state.network_server.close()
+                await app.state.network_server.wait_closed()
+            except Exception:
+                pass
+        # Cancel any client tasks
+        for task in list(app.state.client_tasks):
+            task.cancel()
 
     # HTTP route: serve the main dashboard page
     @app.get("/", response_class=HTMLResponse)
@@ -452,6 +560,98 @@ async def serial_reader(app: FastAPI) -> None:
         await asyncio.sleep(0.05)
 
 
+async def handle_client(app: FastAPI, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Handle a single TCP client connection from the glove.
+
+    This coroutine reads lines from the network client, parses raw
+    sensor values, normalises them, updates the application buffers,
+    performs predictions when the rolling buffer is full and
+    broadcasts updates to connected websockets.  It mirrors the
+    functionality of ``serial_reader`` for TCP connections.
+    """
+    # Register this task so it can be cancelled on shutdown
+    current_task = asyncio.current_task()
+    if current_task is not None:
+        app.state.client_tasks.add(current_task)
+    addr = None
+    try:
+        addr = writer.get_extra_info("peername")
+        print(f"Glove connected from {addr}")
+        while app.state.running:
+            try:
+                line_bytes = await reader.readline()
+            except Exception:
+                break
+            if not line_bytes:
+                # Client closed connection
+                break
+            try:
+                line_str = line_bytes.decode("utf-8", errors="ignore").strip()
+            except Exception:
+                continue
+            parts = [p.strip() for p in line_str.split(",")]
+            if len(parts) != 1 + NUM_SENSORS:
+                # Malformed line; skip
+                continue
+            try:
+                raw_values = [float(x) for x in parts[1:]]
+                timestamp = time.time()
+            except ValueError:
+                continue
+            # Normalise
+            norm_values = normalise(raw_values, app.state.min_vals, app.state.max_vals)
+            # Update buffers
+            rb: List[List[float]] = app.state.rolling_buffer
+            hist: List[List[float]] = app.state.history
+            rb.append(norm_values)
+            if len(rb) > WINDOW_SIZE:
+                rb.pop(0)
+            hist.append(norm_values)
+            if len(hist) > HISTORY_SIZE:
+                hist.pop(0)
+            # Prediction
+            if len(rb) == WINDOW_SIZE and app.state.pred_model.model:
+                ready = True
+                label, prob_dict, conf = app.state.pred_model.predict(rb)
+            else:
+                ready = False
+                label, prob_dict, conf = "", {}, 0.0
+            payload: Dict[str, object] = {
+                "timestamp": timestamp,
+                "sensors": norm_values,
+                "ready": ready,
+            }
+            if ready:
+                payload.update({"prediction": label, "confidence": conf, "probabilities": prob_dict})
+            else:
+                payload.update({"samples_collected": len(rb), "samples_needed": WINDOW_SIZE})
+            # Broadcast to websockets
+            to_remove: List[WebSocket] = []
+            for ws in list(app.state.websockets):
+                try:
+                    await ws.send_json(payload)
+                except Exception:
+                    to_remove.append(ws)
+            for ws in to_remove:
+                app.state.websockets.discard(ws)
+        # End of while
+    except asyncio.CancelledError:
+        # Task cancelled; exit gracefully
+        pass
+    finally:
+        if addr:
+            print(f"Glove disconnected from {addr}")
+        # Clean up writer
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+        # Remove from client_tasks
+        if current_task is not None:
+            app.state.client_tasks.discard(current_task)
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command‑line arguments for the dashboard server."""
     parser = argparse.ArgumentParser(description="Run the sign language glove dashboard server")
@@ -485,6 +685,31 @@ def parse_args() -> argparse.Namespace:
         help="Run in simulation mode without a serial device.",
     )
     parser.add_argument(
+        "--model-type",
+        type=str,
+        default="rf",
+        choices=["rf", "cnn_lstm", "cnn_bilstm"],
+        help="Type of model to load: 'rf' for Random Forest, 'cnn_lstm' or 'cnn_bilstm' for deep learning models.",
+    )
+    parser.add_argument(
+        "--classes",
+        type=str,
+        default=None,
+        help="Comma-separated list of gesture labels corresponding to model output indices. Overrides defaults.",
+    )
+    parser.add_argument(
+        "--tcp-host",
+        type=str,
+        default=None,
+        help="Host interface for the TCP server to listen on (for WiFi glove). Default is '0.0.0.0' when --tcp-port is provided.",
+    )
+    parser.add_argument(
+        "--tcp-port",
+        type=int,
+        default=None,
+        help="TCP port to listen for glove connections over WiFi. If provided, the server will accept sensor data via TCP instead of serial.",
+    )
+    parser.add_argument(
         "--host",
         type=str,
         default="127.0.0.1",
@@ -501,9 +726,11 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":  # pragma: no cover
     args = parse_args()
-    # When not simulating ensure that a serial port is provided
-    if not args.simulate and not args.port:
-        raise SystemExit("Error: --port is required unless --simulate is specified")
+    # When not simulating and not using TCP, ensure that a serial port is provided
+    if not args.simulate and args.tcp_port is None and not args.port:
+        raise SystemExit(
+            "Error: --port is required unless --simulate or --tcp-port is specified"
+        )
     # Create and run the app
     application = create_app(args)
     import uvicorn  # type: ignore
