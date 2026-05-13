@@ -124,109 +124,140 @@ class SensorReader(threading.Thread):
         """Stop the reader thread."""
         self.running = False
 
+def percentile(values: list[float], p: float) -> float:
+    """Return percentile p from a list without requiring numpy."""
+    if not values:
+        raise ValueError("Cannot calculate percentile of empty list")
+
+    sorted_values = sorted(values)
+    if len(sorted_values) == 1:
+        return float(sorted_values[0])
+
+    index = (len(sorted_values) - 1) * (p / 100.0)
+    lower = int(index)
+    upper = min(lower + 1, len(sorted_values) - 1)
+    weight = index - lower
+
+    return float(sorted_values[lower] * (1 - weight) + sorted_values[upper] * weight)
+
 
 def parse_sensor_line(line: str) -> list[float] | None:
     """Parse a line of sensor data from the ESP32.
-    
-    Expected format: counter, sensor0, sensor1, ..., sensor8
-    (10 comma-separated values total)
+
+    Expected format:
+    counter,sensor0,sensor1,sensor2,sensor3,sensor4
     """
     try:
-        values = [float(x.strip()) for x in line.split(',')]
-        if len(values) >= 10:
-            # Return only sensor values (skip counter)
-            return values[1:10]
-        return None
+        values = [float(x.strip()) for x in line.split(",")]
+        if len(values) != 6:
+            print(f"Skipping malformed line: {line!r}")
+            return None
+        return values[1:]
     except ValueError:
+        print(f"Skipping non-numeric line: {line!r}")
         return None
 
 
-def collect_calibration_data(reader: SensorReader, duration: int, prep_time: int) -> list[list[float]]:
-    """Collect sensor data for calibration.
-    
-    Parameters
-    ----------
-    reader : SensorReader
-        Active sensor reader thread.
-    duration : int
-        Number of seconds to collect data after the countdown.
-    prep_time : int
-        Preparation time before countdown begins.
-    
-    Returns
-    -------
-    list[list[float]]
-        List of sensor readings (each row is 9 sensor values).
-    """
-    print(f"\n=== Calibration Preparation ===")
-    print(f"Position the glove with fingers straight.")
+def collect_phase(reader: SensorReader, duration: int, prep_time: int, instruction: str) -> list[list[float]]:
+    """Collect one calibration phase."""
+    print("\n=== Calibration Phase ===")
+    print(instruction)
     print(f"Preparation time: {prep_time} seconds")
-    
-    # Preparation period
+
     for i in range(prep_time, 0, -1):
-        print(f"Calibration starts in {i}s...", end='\r')
+        print(f"Calibration starts in {i}s...", end="\r")
         time.sleep(1)
-    
-    print("\n=== Starting Calibration Data Collection ===")
-    print(f"Collecting for {duration} seconds...\n")
-    
-    calibration_data = []
-    start_time = time.time()
-    
-    # Countdown
+
     for i in range(3, 0, -1):
-        print(f"Countdown: {i}...", end='\r')
+        print(f"Countdown: {i}...", end="\r")
         time.sleep(1)
+
     print("Recording!")
-    
-    # Collect data
+
+    data = []
+    start_time = time.time()
+
     while time.time() - start_time < duration:
         try:
             line = reader.queue.get(timeout=0.1)
             sensors = parse_sensor_line(line)
             if sensors:
-                calibration_data.append(sensors)
+                data.append(sensors)
                 elapsed = time.time() - start_time
-                print(f"Collected {len(calibration_data)} samples ({elapsed:.1f}s)", end='\r')
+                print(f"Collected {len(data)} samples ({elapsed:.1f}s)", end="\r")
         except Empty:
             pass
-    
-    print(f"\nCalibration complete! Collected {len(calibration_data)} samples.\n")
-    return calibration_data
+
+    print(f"\nPhase complete! Collected {len(data)} samples.\n")
+    return data
 
 
-def compute_statistics(calibration_data: list[list[float]]) -> dict:
-    """Compute statistics for each sensor.
-    
-    Parameters
-    ----------
-    calibration_data : list[list[float]]
-        List of sensor readings.
-    
-    Returns
-    -------
-    dict
-        Statistics per sensor: min, max, range, mean, std.
+def collect_calibration_data(reader: SensorReader, duration: int, prep_time: int) -> tuple[list[list[float]], list[list[float]]]:
+    """Collect open-hand and fist calibration data."""
+    open_data = collect_phase(
+        reader,
+        duration,
+        prep_time,
+        "Open your palm fully. Keep all fingers straight. This estimates high sensor values.",
+    )
+
+    fist_data = collect_phase(
+        reader,
+        duration,
+        prep_time,
+        "Close your hand into a tight fist. This estimates low sensor values.",
+    )
+
+    return open_data, fist_data
+
+def compute_statistics(open_data: list[list[float]], fist_data: list[list[float]]) -> dict:
+    """Compute robust calibration statistics for each sensor.
+
+    The usable calibration range is NOT based on raw min/max because
+    unstable sensors can produce outliers.
+
+    Instead:
+    - robust min = 10th percentile of fist readings
+    - robust max = 90th percentile of open-hand readings
     """
-    num_sensors = len(calibration_data[0]) if calibration_data else 0
+
+    if not open_data or not fist_data:
+        return {}
+
+    num_sensors = min(len(open_data[0]), len(fist_data[0]))
     stats = {}
-    
+
     for sensor_idx in range(num_sensors):
-        values = [row[sensor_idx] for row in calibration_data]
-        
-        if len(values) > 1:
-            sensor_std = stdev(values)
-        else:
-            sensor_std = 0.0
-        
+        open_values = [row[sensor_idx] for row in open_data]
+        fist_values = [row[sensor_idx] for row in fist_data]
+
+        robust_min = percentile(fist_values, 10)
+        robust_max = percentile(open_values, 90)
+
+        # Safety fallback if calibration direction is inverted or too narrow
+        if robust_max <= robust_min:
+            combined = open_values + fist_values
+            robust_min = percentile(combined, 10)
+            robust_max = percentile(combined, 90)
+
+        if robust_max <= robust_min:
+            robust_min = min(open_values + fist_values)
+            robust_max = max(open_values + fist_values)
+
+        all_values = open_values + fist_values
+
         stats[f"sensor_{sensor_idx}"] = {
-            "min": float(min(values)),
-            "max": float(max(values)),
-            "range": float(max(values) - min(values)),
-            "mean": float(mean(values)),
-            "std": sensor_std
+            "min": float(robust_min),
+            "max": float(robust_max),
+            "range": float(robust_max - robust_min),
+            "open_mean": float(mean(open_values)),
+            "fist_mean": float(mean(fist_values)),
+            "open_std": float(stdev(open_values)) if len(open_values) > 1 else 0.0,
+            "fist_std": float(stdev(fist_values)) if len(fist_values) > 1 else 0.0,
+            "observed_min": float(min(all_values)),
+            "observed_max": float(max(all_values)),
         }
-    
+
     return stats
 
 
@@ -318,15 +349,15 @@ def main(args: argparse.Namespace) -> None:
     
     try:
         # Collect calibration data
-        calibration_data = collect_calibration_data(reader, args.duration, args.prep_time)
-        
-        if not calibration_data:
-            print("No sensor data collected. Check your serial connection.")
+        open_data, fist_data = collect_calibration_data(reader, args.duration, args.prep_time)
+
+        if not open_data or not fist_data:
+            print("No sensor data collected in one or both calibration phases.")
             sys.exit(1)
         
         # Compute statistics
         print("Computing sensor statistics...")
-        calibration_stats = compute_statistics(calibration_data)
+        calibration_stats = compute_statistics(open_data, fist_data)
         
         # Print summary
         print("\n=== Calibration Summary ===")
@@ -337,7 +368,13 @@ def main(args: argparse.Namespace) -> None:
             print(f"  Stability (std): {stats['std']:.2f}")
         
         # Save calibration
-        save_calibration(calibration_stats, args.output, args.duration, args.prep_time, len(calibration_data))
+        save_calibration(
+                        calibration_stats,
+                        args.output,
+                        args.duration,
+                        args.prep_time,
+                        len(open_data) + len(fist_data),
+                        )
         
     finally:
         reader.stop()

@@ -1,0 +1,50 @@
+{
+  "timestamp": "2026-05-13T12:33:17.546701",
+  "metadata": {
+    "sensor_ranges": [
+      0,
+      1023
+    ],
+    "duration_seconds": 10,
+    "num_samples": 321,
+    "preparation_time": 5,
+    "notes": "Metadata section is preserved but not used when loading calibration. See 'calibration' section for actual sensor statistics."
+  },
+  "calibration": {
+    "sensor_0": {
+      "min": 43.0,
+      "max": 4095.0,
+      "range": 4052.0,
+      "mean": 3625.5607476635514,
+      "std": 476.00025953715533
+    },
+    "sensor_1": {
+      "min": 2499.0,
+      "max": 4095.0,
+      "range": 1596.0,
+      "mean": 3359.9657320872275,
+      "std": 334.67474239482203
+    },
+    "sensor_2": {
+      "min": 1580.0,
+      "max": 4052.0,
+      "range": 2472.0,
+      "mean": 2919.9906542056074,
+      "std": 408.69912134403125
+    },
+    "sensor_3": {
+      "min": 3097.0,
+      "max": 4095.0,
+      "range": 998.0,
+      "mean": 3997.1152647975077,
+      "std": 150.29087147098386
+    },
+    "sensor_4": {
+      "min": 2729.0,
+      "max": 4065.0,
+      "range": 1336.0,
+      "mean": 3517.9221183800623,
+      "std": 198.08262995653718
+    }
+  }
+}
