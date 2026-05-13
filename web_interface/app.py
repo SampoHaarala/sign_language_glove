@@ -49,11 +49,18 @@ import asyncio
 import json
 import os
 import random
+import sys
 import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+# Ensure the project root is importable when running from the web_interface folder
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+import feature_extractor
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -72,7 +79,7 @@ except ImportError:  # pragma: no cover
 # -----------------------------------------------------------------------------
 # Configuration constants
 #
-WINDOW_SIZE = 128  # number of samples required for a prediction
+DEFAULT_WINDOW_SIZE = 32  # default number of samples required for a prediction
 HISTORY_SIZE = 150  # length of history buffer for plotting
 NUM_SENSORS = 5  # glove sends five sensor values per line
 DEFAULT_ADC_MAX = 4065.0  # maximum ADC value for ESP32 S3
@@ -251,9 +258,9 @@ class PredictionModel:
             return "?", {}, 0.0
         try:
             if self.model_type == "rf":
-                # Compute simple statistical features and reshape
-                feats = compute_features(window)
-                feats = feats.reshape(1, -1)
+                # Use the project's feature extractor for Random Forest inputs.
+                arr = np.asarray(window, dtype=np.float32)
+                feats = feature_extractor.extract_features(arr).reshape(1, -1)
                 # Use predict_proba if available
                 if hasattr(self.model, "predict_proba"):
                     probas = self.model.predict_proba(feats)[0]
@@ -306,19 +313,25 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     app.state.min_vals = min_vals
     app.state.max_vals = max_vals
     app.state.pred_model = pred_model
-    app.state.rolling_buffer: List[List[float]] = []  # latest WINDOW_SIZE rows
+    app.state.rolling_buffer: List[List[float]] = []  # latest window_size rows
     app.state.history: List[List[float]] = []  # longer plot history
     app.state.websockets: set[WebSocket] = set()
     app.state.running = True
     app.state.simulate = args.simulate
+    app.state.window_size = args.window_size
 
     # TCP server configuration; if provided, the server will accept
     # incoming connections from the glove over WiFi.  The
     # network_server attribute holds the asyncio.Server instance and
     # client_tasks stores tasks spawned for each connected client.
-    app.state.tcp_host = args.tcp_host
+    app.state.tcp_host = args.tcp_host or "0.0.0.0"
     app.state.tcp_port = args.tcp_port
     app.state.network_server = None
+    app.state.tcp_server_running = False
+    app.state.glove_connected = False
+    app.state.valid_tcp_lines_received = 0
+    app.state.last_tcp_line_time: Optional[float] = None
+    app.state.first_valid_tcp_line_logged = False
     app.state.client_tasks: set[asyncio.Task] = set()
 
     # Serial connection handle stored in state
@@ -346,13 +359,14 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     time.sleep(2.0)
                     if hasattr(app.state.serial, "reset_input_buffer"):
                         app.state.serial.reset_input_buffer()
+                    app.state.glove_connected = True
                     print(f"Serial input enabled on {args.port}")
                 except Exception as e:
                     print(f"Failed to open serial port {args.port}: {e}. Serial input disabled.")
                     app.state.serial = None
 
         # Start serial/simulation reader only when actually needed.
-        if app.state.simulate or args.port:
+        if app.state.simulate or app.state.serial:
             loop.create_task(serial_reader(app))
 
         # Start TCP server if configured.
@@ -360,14 +374,17 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             try:
                 server = await asyncio.start_server(
                     lambda r, w: handle_client(app, r, w),
-                    host=app.state.tcp_host or "0.0.0.0",
+                    host=app.state.tcp_host,
                     port=app.state.tcp_port,
                 )
                 app.state.network_server = server
+                app.state.tcp_server_running = True
                 loop.create_task(server.serve_forever())
-                addr = ", ".join(str(sock.getsockname()) for sock in server.sockets)
+                # Print a tuple-style address for consistency with expectations.
+                addr = server.sockets[0].getsockname() if server.sockets else (app.state.tcp_host, app.state.tcp_port)
                 print(f"Listening for glove TCP connections on {addr}")
             except Exception as e:
+                app.state.tcp_server_running = False
                 print(f"Failed to start TCP server on {app.state.tcp_host}:{app.state.tcp_port}: {e}")
 
     @app.on_event("shutdown")
@@ -411,7 +428,14 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         status = {
             "running": bool(app.state.running),
             "simulate": bool(app.state.simulate),
-            "connected_clients": len(app.state.websockets),
+            "tcp_host": app.state.tcp_host,
+            "tcp_port": app.state.tcp_port,
+            "tcp_server_running": bool(app.state.tcp_server_running),
+            "glove_connected": bool(app.state.glove_connected),
+            "valid_tcp_lines_received": int(app.state.valid_tcp_lines_received),
+            "last_tcp_line_time": app.state.last_tcp_line_time,
+            "model_loaded": bool(app.state.pred_model.model),
+            "window_size": int(app.state.window_size),
         }
         return JSONResponse(content=status)
 
@@ -419,10 +443,13 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     @app.get("/config")
     async def config() -> JSONResponse:
         conf = {
-            "window_size": WINDOW_SIZE,
+            "window_size": int(app.state.window_size),
             "history_size": HISTORY_SIZE,
             "num_sensors": NUM_SENSORS,
             "model_loaded": bool(app.state.pred_model.model),
+            "tcp_host": app.state.tcp_host,
+            "tcp_port": app.state.tcp_port,
+            "tcp_server_running": bool(app.state.tcp_server_running),
         }
         return JSONResponse(content=conf)
 
@@ -510,14 +537,14 @@ async def serial_reader(app: FastAPI) -> None:
         rb = app.state.rolling_buffer
         hist = app.state.history
         rb.append(norm_values)
-        if len(rb) > WINDOW_SIZE:
+        if len(rb) > app.state.window_size:
             rb.pop(0)
         hist.append(norm_values)
         if len(hist) > HISTORY_SIZE:
             hist.pop(0)
 
         # Determine readiness and perform prediction if enough data
-        if len(rb) == WINDOW_SIZE and app.state.pred_model.model:
+        if len(rb) == app.state.window_size and app.state.pred_model.model:
             ready = True
             label, prob_dict, conf = app.state.pred_model.predict(rb)
         else:
@@ -529,6 +556,11 @@ async def serial_reader(app: FastAPI) -> None:
             "timestamp": timestamp,
             "sensors": norm_values,
             "ready": ready,
+            "source": "serial" if not app.state.simulate else "simulate",
+            "simulate": app.state.simulate,
+            "model_loaded": bool(app.state.pred_model.model),
+            "window_size": int(app.state.window_size),
+            "glove_connected": app.state.glove_connected,
         }
         if ready:
             payload.update(
@@ -542,7 +574,7 @@ async def serial_reader(app: FastAPI) -> None:
             payload.update(
                 {
                     "samples_collected": len(rb),
-                    "samples_needed": WINDOW_SIZE,
+                    "samples_needed": app.state.window_size,
                 }
             )
         # Dispatch payload to all connected websockets
@@ -577,6 +609,7 @@ async def handle_client(app: FastAPI, reader: asyncio.StreamReader, writer: asyn
     addr = None
     try:
         addr = writer.get_extra_info("peername")
+        app.state.glove_connected = True
         print(f"Glove connected from {addr}")
         while app.state.running:
             try:
@@ -592,26 +625,32 @@ async def handle_client(app: FastAPI, reader: asyncio.StreamReader, writer: asyn
                 continue
             parts = [p.strip() for p in line_str.split(",")]
             if len(parts) != 1 + NUM_SENSORS:
-                # Malformed line; skip
+                print(f"Malformed TCP line skipped: {line_str}")
                 continue
             try:
                 raw_values = [float(x) for x in parts[1:]]
                 timestamp = time.time()
             except ValueError:
+                print(f"Malformed TCP line skipped: {line_str}")
                 continue
+            if app.state.valid_tcp_lines_received == 0 and not app.state.first_valid_tcp_line_logged:
+                print(f"First valid TCP line received: {line_str}")
+                app.state.first_valid_tcp_line_logged = True
+            app.state.valid_tcp_lines_received += 1
+            app.state.last_tcp_line_time = timestamp
             # Normalise
             norm_values = normalise(raw_values, app.state.min_vals, app.state.max_vals)
             # Update buffers
             rb: List[List[float]] = app.state.rolling_buffer
             hist: List[List[float]] = app.state.history
             rb.append(norm_values)
-            if len(rb) > WINDOW_SIZE:
+            if len(rb) > app.state.window_size:
                 rb.pop(0)
             hist.append(norm_values)
             if len(hist) > HISTORY_SIZE:
                 hist.pop(0)
             # Prediction
-            if len(rb) == WINDOW_SIZE and app.state.pred_model.model:
+            if len(rb) == app.state.window_size and app.state.pred_model.model:
                 ready = True
                 label, prob_dict, conf = app.state.pred_model.predict(rb)
             else:
@@ -621,11 +660,16 @@ async def handle_client(app: FastAPI, reader: asyncio.StreamReader, writer: asyn
                 "timestamp": timestamp,
                 "sensors": norm_values,
                 "ready": ready,
+                "source": "tcp",
+                "simulate": app.state.simulate,
+                "model_loaded": bool(app.state.pred_model.model),
+                "window_size": int(app.state.window_size),
+                "glove_connected": app.state.glove_connected,
             }
             if ready:
                 payload.update({"prediction": label, "confidence": conf, "probabilities": prob_dict})
             else:
-                payload.update({"samples_collected": len(rb), "samples_needed": WINDOW_SIZE})
+                payload.update({"samples_collected": len(rb), "samples_needed": app.state.window_size})
             # Broadcast to websockets
             to_remove: List[WebSocket] = []
             for ws in list(app.state.websockets):
@@ -642,6 +686,7 @@ async def handle_client(app: FastAPI, reader: asyncio.StreamReader, writer: asyn
     finally:
         if addr:
             print(f"Glove disconnected from {addr}")
+        app.state.glove_connected = False
         # Clean up writer
         try:
             writer.close()
@@ -679,6 +724,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Path to a JSON calibration file from calibrate_glove.py.",
+    )
+    parser.add_argument(
+        "--window-size",
+        type=int,
+        default=DEFAULT_WINDOW_SIZE,
+        help="Number of samples per prediction window. Defaults to 32.",
     )
     parser.add_argument(
         "--simulate",
