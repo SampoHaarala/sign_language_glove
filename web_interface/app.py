@@ -209,91 +209,154 @@ class PredictionModel:
         model_path: Optional[str],
         model_type: str = "rf",
         classes: Optional[List[str]] = None,
+        rf_model_path: Optional[str] = None,
+        cnn_model_path: Optional[str] = None,
     ) -> None:
         self.model_type = model_type.lower()
-        self.model = None  # underlying classifier or Keras model
+        self.model = None  # primary model for single-model modes
+        self.rf_model = None
+        self.cnn_model = None
         # Determine class labels
         if classes is None:
             classes = get_default_classes()
         self.idx_to_label: Dict[int, str] = {idx: label for idx, label in enumerate(classes)}
         # Load model depending on type
+        if self.model_type == "both":
+            # Load both Random Forest and CNN models for ensemble predictions.
+            self.rf_model = self._load_rf_model(rf_model_path or model_path)
+            self.cnn_model = self._load_cnn_model(cnn_model_path or model_path)
+            self.model = None
+            return
         if not model_path:
             return
         if self.model_type == "rf":
-            # Load scikit‑learn model saved via joblib
-            if joblib is None:
-                return
-            try:
-                model_data = joblib.load(model_path)
-                if isinstance(model_data, dict):
-                    self.model = model_data.get("model") or model_data.get("clf")
-                    label_to_idx: Optional[Dict[str, int]] = model_data.get("label_to_idx")
-                    if label_to_idx:
-                        self.idx_to_label = {idx: label for label, idx in label_to_idx.items()}
-                else:
-                    self.model = model_data
-            except Exception:
-                self.model = None
+            self.model = self._load_rf_model(model_path)
         elif self.model_type in ("cnn_lstm", "cnn_bilstm", "cnn", "keras"):
-            # Attempt to load a Keras model
-            try:
-                # Delay import of tensorflow to avoid unnecessary dependency if unused
-                import tensorflow as tf  # type: ignore
-
-                self.model = tf.keras.models.load_model(model_path)
-            except Exception:
-                self.model = None
+            self.model = self._load_cnn_model(model_path)
         else:
-            # Unknown model type
             self.model = None
 
-    def predict(self, window: List[List[float]]) -> Tuple[str, Dict[str, float], float]:
+    def _load_rf_model(self, model_path: Optional[str]) -> Optional[object]:
+        if not model_path or joblib is None:
+            return None
+        try:
+            model_data = joblib.load(model_path)
+            if isinstance(model_data, dict):
+                model = model_data.get("model") or model_data.get("clf")
+                label_to_idx: Optional[Dict[str, int]] = model_data.get("label_to_idx")
+                if label_to_idx:
+                    self.idx_to_label = {idx: label for label, idx in label_to_idx.items()}
+                return model
+            return model_data
+        except Exception:
+            return None
+
+    def _load_cnn_model(self, model_path: Optional[str]) -> Optional[object]:
+        if not model_path:
+            return None
+        try:
+            import tensorflow as tf  # type: ignore
+
+            return tf.keras.models.load_model(model_path)
+        except Exception:
+            return None
+
+    def predict(self, window: List[List[float]]) -> Dict[str, object]:
         """Predict the label and probabilities for the most recent window.
 
-        Returns ``(label, probability_dict, confidence)``.  If no model is
-        loaded or inference fails, returns a placeholder label "?" and
-        empty probability dictionary with zero confidence.
+        Returns a dictionary containing the ensemble label, confidence and
+        probability map. For ``both`` mode, per-model predictions and
+        confidences are also included.
         """
+        if self.model_type == "both":
+            if not self.rf_model and not self.cnn_model:
+                return {"label": "?", "probabilities": {}, "confidence": 0.0}
+            rf_result = self._predict_rf(window) if self.rf_model else None
+            cnn_result = self._predict_cnn(window) if self.cnn_model else None
+            rf_label = rf_result[0] if rf_result else "?"
+            rf_probs = rf_result[1] if rf_result else {}
+            rf_conf = rf_result[2] if rf_result else 0.0
+            cnn_label = cnn_result[0] if cnn_result else "?"
+            cnn_probs = cnn_result[1] if cnn_result else {}
+            cnn_conf = cnn_result[2] if cnn_result else 0.0
+            if rf_label == cnn_label:
+                ensemble_label = rf_label
+                ensemble_conf = (rf_conf + cnn_conf) / 2.0
+            elif rf_conf > cnn_conf:
+                ensemble_label = rf_label
+                ensemble_conf = rf_conf
+            else:
+                ensemble_label = cnn_label
+                ensemble_conf = cnn_conf
+            all_labels = set(rf_probs) | set(cnn_probs)
+            ensemble_probs: Dict[str, float] = {
+                label: (rf_probs.get(label, 0.0) + cnn_probs.get(label, 0.0)) / (
+                    2.0 if rf_probs and cnn_probs else 1.0
+                )
+                for label in all_labels
+            }
+            return {
+                "label": ensemble_label,
+                "probabilities": ensemble_probs,
+                "confidence": float(ensemble_conf),
+                "rf_prediction": rf_label,
+                "rf_confidence": float(rf_conf),
+                "cnn_prediction": cnn_label,
+                "cnn_confidence": float(cnn_conf),
+            }
         if not self.model:
-            return "?", {}, 0.0
+            return {"label": "?", "probabilities": {}, "confidence": 0.0}
         try:
             if self.model_type == "rf":
-                # Use the project's feature extractor for Random Forest inputs.
-                arr = np.asarray(window, dtype=np.float32)
-                feats = feature_extractor.extract_features(arr).reshape(1, -1)
-                # Use predict_proba if available
-                if hasattr(self.model, "predict_proba"):
-                    probas = self.model.predict_proba(feats)[0]
-                    pred_idx = int(np.argmax(probas))
-                    confidence = float(probas[pred_idx])
-                    label = self.idx_to_label.get(pred_idx, str(pred_idx))
-                    prob_dict: Dict[str, float] = {
-                        self.idx_to_label.get(i, str(i)): float(p)
-                        for i, p in enumerate(probas)
-                    }
-                    return label, prob_dict, confidence
-                # Fall back to predict() if no probabilities available
-                pred = self.model.predict(feats)[0]
-                label = self.idx_to_label.get(int(pred), str(pred))
-                return label, {label: 1.0}, 1.0
-            else:
-                # CNN‑based models expect a 3D tensor (batch, timesteps, sensors)
-                arr = np.asarray(window, dtype=np.float32)
-                arr = arr.reshape((1, arr.shape[0], arr.shape[1]))
-                # Predict probabilities; suppress verbose logging
-                probas = self.model.predict(arr, verbose=0)
-                # Some models return nested arrays
-                probas = np.asarray(probas).reshape(-1)
-                pred_idx = int(np.argmax(probas))
-                confidence = float(probas[pred_idx])
-                label = self.idx_to_label.get(pred_idx, str(pred_idx))
-                prob_dict = {
-                    self.idx_to_label.get(i, str(i)): float(p)
-                    for i, p in enumerate(probas)
+                rf_result = self._predict_rf(window)
+                return {
+                    "label": rf_result[0],
+                    "probabilities": rf_result[1],
+                    "confidence": float(rf_result[2]),
                 }
-                return label, prob_dict, confidence
+            else:
+                cnn_result = self._predict_cnn(window)
+                return {
+                    "label": cnn_result[0],
+                    "probabilities": cnn_result[1],
+                    "confidence": float(cnn_result[2]),
+                }
         except Exception:
-            return "?", {}, 0.0
+            return {"label": "?", "probabilities": {}, "confidence": 0.0}
+
+    def _predict_rf(self, window: List[List[float]]) -> Tuple[str, Dict[str, float], float]:
+        arr = np.asarray(window, dtype=np.float32)
+        feats = feature_extractor.extract_features(arr).reshape(1, -1)
+        if hasattr(self.rf_model or self.model, "predict_proba"):
+            model = self.rf_model or self.model
+            probas = model.predict_proba(feats)[0]
+            pred_idx = int(np.argmax(probas))
+            confidence = float(probas[pred_idx])
+            label = self.idx_to_label.get(pred_idx, str(pred_idx))
+            prob_dict = {
+                self.idx_to_label.get(i, str(i)): float(p)
+                for i, p in enumerate(probas)
+            }
+            return label, prob_dict, confidence
+        model = self.rf_model or self.model
+        pred = model.predict(feats)[0]
+        label = self.idx_to_label.get(int(pred), str(pred))
+        return label, {label: 1.0}, 1.0
+
+    def _predict_cnn(self, window: List[List[float]]) -> Tuple[str, Dict[str, float], float]:
+        arr = np.asarray(window, dtype=np.float32)
+        arr = arr.reshape((1, arr.shape[0], arr.shape[1]))
+        model = self.cnn_model or self.model
+        probas = model.predict(arr, verbose=0)
+        probas = np.asarray(probas).reshape(-1)
+        pred_idx = int(np.argmax(probas))
+        confidence = float(probas[pred_idx])
+        label = self.idx_to_label.get(pred_idx, str(pred_idx))
+        prob_dict = {
+            self.idx_to_label.get(i, str(i)): float(p)
+            for i, p in enumerate(probas)
+        }
+        return label, prob_dict, confidence
 
 
 def create_app(args: argparse.Namespace) -> FastAPI:
@@ -307,10 +370,19 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         class_list = [s.strip() for s in args.classes.split(",") if s.strip()]
     else:
         class_list = None
-    pred_model = PredictionModel(args.model, model_type=args.model_type, classes=class_list)
+    pred_model = PredictionModel(
+        args.model,
+        model_type=args.model_type,
+        classes=class_list,
+        rf_model_path=args.rf_model,
+        cnn_model_path=args.cnn_model,
+    )
 
     # Application state
     app.state.min_vals = min_vals
+    app.state.model_type = args.model_type
+    app.state.has_rf_model = bool(pred_model.rf_model or (args.model_type == "rf" and pred_model.model))
+    app.state.has_cnn_model = bool(pred_model.cnn_model or (args.model_type != "rf" and pred_model.model))
     app.state.max_vals = max_vals
     app.state.pred_model = pred_model
     app.state.rolling_buffer: List[List[float]] = []  # latest window_size rows
@@ -434,7 +506,10 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             "glove_connected": bool(app.state.glove_connected),
             "valid_tcp_lines_received": int(app.state.valid_tcp_lines_received),
             "last_tcp_line_time": app.state.last_tcp_line_time,
-            "model_loaded": bool(app.state.pred_model.model),
+            "model_loaded": bool(app.state.pred_model.model or app.state.pred_model.rf_model or app.state.pred_model.cnn_model),
+            "model_type": app.state.model_type,
+            "has_rf_model": bool(app.state.has_rf_model),
+            "has_cnn_model": bool(app.state.has_cnn_model),
             "window_size": int(app.state.window_size),
         }
         return JSONResponse(content=status)
@@ -446,7 +521,10 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             "window_size": int(app.state.window_size),
             "history_size": HISTORY_SIZE,
             "num_sensors": NUM_SENSORS,
-            "model_loaded": bool(app.state.pred_model.model),
+            "model_loaded": bool(app.state.pred_model.model or app.state.pred_model.rf_model or app.state.pred_model.cnn_model),
+            "model_type": app.state.model_type,
+            "has_rf_model": bool(app.state.has_rf_model),
+            "has_cnn_model": bool(app.state.has_cnn_model),
             "tcp_host": app.state.tcp_host,
             "tcp_port": app.state.tcp_port,
             "tcp_server_running": bool(app.state.tcp_server_running),
@@ -544,12 +622,17 @@ async def serial_reader(app: FastAPI) -> None:
             hist.pop(0)
 
         # Determine readiness and perform prediction if enough data
-        if len(rb) == app.state.window_size and app.state.pred_model.model:
+        model_loaded = bool(
+            app.state.pred_model.model
+            or app.state.pred_model.rf_model
+            or app.state.pred_model.cnn_model
+        )
+        if len(rb) == app.state.window_size and model_loaded:
             ready = True
-            label, prob_dict, conf = app.state.pred_model.predict(rb)
+            prediction = app.state.pred_model.predict(rb)
         else:
             ready = False
-            label, prob_dict, conf = "", {}, 0.0
+            prediction = {"label": "", "probabilities": {}, "confidence": 0.0}
 
         # Build payload
         payload: Dict[str, object] = {
@@ -558,18 +641,28 @@ async def serial_reader(app: FastAPI) -> None:
             "ready": ready,
             "source": "serial" if not app.state.simulate else "simulate",
             "simulate": app.state.simulate,
-            "model_loaded": bool(app.state.pred_model.model),
+            "model_loaded": model_loaded,
+            "model_type": app.state.model_type,
             "window_size": int(app.state.window_size),
             "glove_connected": app.state.glove_connected,
         }
         if ready:
             payload.update(
                 {
-                    "prediction": label,
-                    "confidence": conf,
-                    "probabilities": prob_dict,
+                    "prediction": prediction.get("label", ""),
+                    "confidence": prediction.get("confidence", 0.0),
+                    "probabilities": prediction.get("probabilities", {}),
                 }
             )
+            if "rf_prediction" in prediction:
+                payload.update(
+                    {
+                        "rf_prediction": prediction["rf_prediction"],
+                        "rf_confidence": prediction["rf_confidence"],
+                        "cnn_prediction": prediction["cnn_prediction"],
+                        "cnn_confidence": prediction["cnn_confidence"],
+                    }
+                )
         else:
             payload.update(
                 {
@@ -650,24 +743,45 @@ async def handle_client(app: FastAPI, reader: asyncio.StreamReader, writer: asyn
             if len(hist) > HISTORY_SIZE:
                 hist.pop(0)
             # Prediction
-            if len(rb) == app.state.window_size and app.state.pred_model.model:
+            model_loaded = bool(
+                app.state.pred_model.model
+                or app.state.pred_model.rf_model
+                or app.state.pred_model.cnn_model
+            )
+            if len(rb) == app.state.window_size and model_loaded:
                 ready = True
-                label, prob_dict, conf = app.state.pred_model.predict(rb)
+                prediction = app.state.pred_model.predict(rb)
             else:
                 ready = False
-                label, prob_dict, conf = "", {}, 0.0
+                prediction = {"label": "", "probabilities": {}, "confidence": 0.0}
             payload: Dict[str, object] = {
                 "timestamp": timestamp,
                 "sensors": norm_values,
                 "ready": ready,
                 "source": "tcp",
                 "simulate": app.state.simulate,
-                "model_loaded": bool(app.state.pred_model.model),
+                "model_loaded": model_loaded,
+                "model_type": app.state.model_type,
                 "window_size": int(app.state.window_size),
                 "glove_connected": app.state.glove_connected,
             }
             if ready:
-                payload.update({"prediction": label, "confidence": conf, "probabilities": prob_dict})
+                payload.update(
+                    {
+                        "prediction": prediction.get("label", ""),
+                        "confidence": prediction.get("confidence", 0.0),
+                        "probabilities": prediction.get("probabilities", {}),
+                    }
+                )
+                if "rf_prediction" in prediction:
+                    payload.update(
+                        {
+                            "rf_prediction": prediction["rf_prediction"],
+                            "rf_confidence": prediction["rf_confidence"],
+                            "cnn_prediction": prediction["cnn_prediction"],
+                            "cnn_confidence": prediction["cnn_confidence"],
+                        }
+                    )
             else:
                 payload.update({"samples_collected": len(rb), "samples_needed": app.state.window_size})
             # Broadcast to websockets
@@ -717,7 +831,19 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default=None,
-        help="Path to a joblib file containing the trained model and label mapping.",
+        help="Path to a single model file. For ensemble mode, use --rf-model and --cnn-model instead.",
+    )
+    parser.add_argument(
+        "--rf-model",
+        type=str,
+        default=None,
+        help="Path to a Random Forest joblib file. Required when --model-type both is selected.",
+    )
+    parser.add_argument(
+        "--cnn-model",
+        type=str,
+        default=None,
+        help="Path to a Keras model file. Required when --model-type both is selected.",
     )
     parser.add_argument(
         "--calibration",
@@ -740,8 +866,8 @@ def parse_args() -> argparse.Namespace:
         "--model-type",
         type=str,
         default="rf",
-        choices=["rf", "cnn_lstm", "cnn_bilstm"],
-        help="Type of model to load: 'rf' for Random Forest, 'cnn_lstm' or 'cnn_bilstm' for deep learning models.",
+        choices=["rf", "cnn_lstm", "cnn_bilstm", "both"],
+        help="Type of model to load: 'rf', 'cnn_lstm', 'cnn_bilstm', or 'both' to use RF + CNN ensemble.",
     )
     parser.add_argument(
         "--classes",
@@ -782,6 +908,10 @@ if __name__ == "__main__":  # pragma: no cover
     if not args.simulate and args.tcp_port is None and not args.port:
         raise SystemExit(
             "Error: --port is required unless --simulate or --tcp-port is specified"
+        )
+    if args.model_type == "both" and not (args.rf_model and args.cnn_model):
+        raise SystemExit(
+            "Error: --rf-model and --cnn-model are required when --model-type both is selected"
         )
     # Create and run the app
     application = create_app(args)

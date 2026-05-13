@@ -113,12 +113,11 @@
     const endpoint = `${protocol}://${window.location.host}/ws`;
     const ws = new WebSocket(endpoint);
     ws.onopen = () => {
-      statusEl.textContent = "Connected to dashboard. Waiting for glove TCP connection…";
+      statusEl.textContent = "Connected. Waiting for samples…";
     };
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        const windowSize = data.window_size || 32;
         // Update sensor numeric values
         if (Array.isArray(data.sensors)) {
           for (let i = 0; i < NUM_SENSORS; i++) {
@@ -141,20 +140,19 @@
         if (data.ready) {
           predictionLetterEl.textContent = data.prediction || "–";
           predictionConfEl.textContent = ((data.confidence || 0) * 100).toFixed(1) + "%";
-          statusEl.textContent = "Predicting";
+          if (data.model_type === "both" && data.rf_prediction && data.cnn_prediction) {
+            statusEl.textContent = `Ensemble: ${data.prediction} (RF: ${data.rf_prediction}, CNN: ${data.cnn_prediction})`;
+          } else {
+            statusEl.textContent = "Predicting…";
+          }
           updateProbabilities(data.probabilities);
         } else {
+          // Not ready yet; show buffer status
           predictionLetterEl.textContent = "–";
           predictionConfEl.textContent = "";
           const collected = data.samples_collected || 0;
-          const needed = data.samples_needed || windowSize;
-          if (data.source === "tcp" && !data.glove_connected) {
-            statusEl.textContent = "Waiting for glove TCP connection";
-          } else if (!data.model_loaded) {
-            statusEl.textContent = "Model not loaded, plotting only";
-          } else {
-            statusEl.textContent = `Glove connected, collecting buffer ${collected}/${needed}`;
-          }
+          const needed = data.samples_needed || 0;
+          statusEl.textContent = `Collecting buffer: ${collected}/${needed}`;
           updateProbabilities({});
         }
       } catch (err) {
