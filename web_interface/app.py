@@ -72,8 +72,8 @@ except ImportError:  # pragma: no cover
 # -----------------------------------------------------------------------------
 # Configuration constants
 #
-WINDOW_SIZE = 64  # number of samples required for a prediction
-HISTORY_SIZE = 300  # length of history buffer for plotting
+WINDOW_SIZE = 128  # number of samples required for a prediction
+HISTORY_SIZE = 150  # length of history buffer for plotting
 NUM_SENSORS = 5  # glove sends five sensor values per line
 DEFAULT_ADC_MAX = 4065.0  # maximum ADC value for ESP32 S3
 
@@ -327,33 +327,35 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
     @app.on_event("startup")
     async def on_startup() -> None:
-        """FastAPI startup handler; set up serial and background reader."""
-        # Only create serial port if not simulating
-        if not app.state.simulate:
+        """FastAPI startup handler; set up input sources."""
+        loop = asyncio.get_event_loop()
+    
+        # Only open USB serial if --port was explicitly provided.
+        # In WiFi/TCP mode, missing serial must NOT enable simulation.
+        if not app.state.simulate and args.port:
             if serial is None:
-                print("Warning: pyserial not installed; running in simulation mode")
-                app.state.simulate = True
+                print("Warning: pyserial not installed; serial input disabled")
+                app.state.serial = None
             else:
                 try:
-                    # Open serial connection.  A timeout of 1 second avoids blocking
                     app.state.serial = serial.Serial(
                         args.port,
                         args.baud,
                         timeout=1,
                     )
-                    # Give the MCU time to reset after opening the port
                     time.sleep(2.0)
-                    # Flush any old data
                     if hasattr(app.state.serial, "reset_input_buffer"):
                         app.state.serial.reset_input_buffer()
-                except Exception as e:  # pragma: no cover
-                    print(f"Failed to open serial port {args.port}: {e}. Falling back to simulation.")
-                    app.state.simulate = True
+                    print(f"Serial input enabled on {args.port}")
+                except Exception as e:
+                    print(f"Failed to open serial port {args.port}: {e}. Serial input disabled.")
                     app.state.serial = None
-        loop = asyncio.get_event_loop()
-        # Start serial/simulation reader task
-        loop.create_task(serial_reader(app))
-        # Start TCP server if configured
+
+        # Start serial/simulation reader only when actually needed.
+        if app.state.simulate or args.port:
+            loop.create_task(serial_reader(app))
+
+        # Start TCP server if configured.
         if app.state.tcp_port is not None:
             try:
                 server = await asyncio.start_server(
@@ -362,7 +364,6 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     port=app.state.tcp_port,
                 )
                 app.state.network_server = server
-                # Start serving in the background
                 loop.create_task(server.serve_forever())
                 addr = ", ".join(str(sock.getsockname()) for sock in server.sockets)
                 print(f"Listening for glove TCP connections on {addr}")
