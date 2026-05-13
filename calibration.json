@@ -1,50 +1,70 @@
 {
-  "timestamp": "2026-05-13T12:33:17.546701",
+  "timestamp": "2026-05-13T12:50:11.348997",
   "metadata": {
     "sensor_ranges": [
       0,
       1023
     ],
     "duration_seconds": 10,
-    "num_samples": 321,
+    "num_samples": 742,
     "preparation_time": 5,
     "notes": "Metadata section is preserved but not used when loading calibration. See 'calibration' section for actual sensor statistics."
   },
   "calibration": {
     "sensor_0": {
-      "min": 43.0,
-      "max": 4095.0,
-      "range": 4052.0,
-      "mean": 3625.5607476635514,
-      "std": 476.00025953715533
+      "min": 2048.0,
+      "max": 3879.0,
+      "range": 1831.0,
+      "open_mean": 3329.803149606299,
+      "fist_mean": 2346.0609418282547,
+      "open_std": 347.49981535860474,
+      "fist_std": 407.43639810159254,
+      "observed_min": 1896.0,
+      "observed_max": 4095.0
     },
     "sensor_1": {
-      "min": 2499.0,
-      "max": 4095.0,
-      "range": 1596.0,
-      "mean": 3359.9657320872275,
-      "std": 334.67474239482203
+      "min": 1049.0,
+      "max": 3315.0,
+      "range": 2266.0,
+      "open_mean": 3124.6456692913384,
+      "fist_mean": 1284.4709141274238,
+      "open_std": 193.0593252519078,
+      "fist_std": 528.9373412392224,
+      "observed_min": 969.0,
+      "observed_max": 4095.0
     },
     "sensor_2": {
-      "min": 1580.0,
-      "max": 4052.0,
-      "range": 2472.0,
-      "mean": 2919.9906542056074,
-      "std": 408.69912134403125
+      "min": 1145.0,
+      "max": 3403.0,
+      "range": 2258.0,
+      "open_mean": 3113.963254593176,
+      "fist_mean": 1354.1135734072022,
+      "open_std": 342.8353352081353,
+      "fist_std": 514.3554443926514,
+      "observed_min": 1061.0,
+      "observed_max": 3992.0
     },
     "sensor_3": {
-      "min": 3097.0,
+      "min": 1445.0,
       "max": 4095.0,
-      "range": 998.0,
-      "mean": 3997.1152647975077,
-      "std": 150.29087147098386
+      "range": 2650.0,
+      "open_mean": 3949.690288713911,
+      "fist_mean": 1744.1301939058171,
+      "open_std": 278.2425459070039,
+      "fist_std": 619.3864187889819,
+      "observed_min": 1373.0,
+      "observed_max": 4095.0
     },
     "sensor_4": {
-      "min": 2729.0,
-      "max": 4065.0,
-      "range": 1336.0,
-      "mean": 3517.9221183800623,
-      "std": 198.08262995653718
+      "min": 887.0,
+      "max": 3931.0,
+      "range": 3044.0,
+      "open_mean": 3384.540682414698,
+      "fist_mean": 2000.2603878116342,
+      "open_std": 367.79045313810565,
+      "fist_std": 631.6171825902004,
+      "observed_min": 675.0,
+      "observed_max": 4095.0
     }
   }
 }

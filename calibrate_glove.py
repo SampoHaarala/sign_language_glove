@@ -363,9 +363,22 @@ def main(args: argparse.Namespace) -> None:
         print("\n=== Calibration Summary ===")
         for sensor_name, stats in calibration_stats.items():
             print(f"{sensor_name}:")
-            print(f"  Range: {stats['min']:.1f} - {stats['max']:.1f} (span: {stats['range']:.1f})")
-            print(f"  Mean:  {stats['mean']:.1f}")
-            print(f"  Stability (std): {stats['std']:.2f}")
+            print(
+                f"  Robust range: {stats['min']:.1f} - {stats['max']:.1f} "
+                f"(span: {stats['range']:.1f})"
+            )
+            print(
+                f"  Open hand: mean {stats['open_mean']:.1f}, "
+                f"std {stats['open_std']:.2f}"
+            )
+            print(
+                f"  Fist:      mean {stats['fist_mean']:.1f}, "
+                f"std {stats['fist_std']:.2f}"
+            )
+            print(
+                f"  Observed raw extremes: "
+                f"{stats['observed_min']:.1f} - {stats['observed_max']:.1f}"
+            )
         
         # Save calibration
         save_calibration(
