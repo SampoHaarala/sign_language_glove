@@ -230,13 +230,17 @@ def main(args: argparse.Namespace) -> None:
         clf.fit(X_train, y_train)
         # Evaluate
         if classification_report is not None:
-            logger.info("Validation results:")
             if X_val is not None:
                 y_pred = clf.predict(X_val)
+                logger.info("Validation Confusion Matrix:")
+                logger.info("\n" + str(confusion_matrix(y_val, y_pred)))
+                logger.info("Validation Classification Report:")
                 logger.info("\n" + classification_report(y_val, y_pred))
             if X_test is not None:
-                logger.info("Test results:")
+                logger.info("Test Confusion Matrix:")
                 y_pred = clf.predict(X_test)
+                logger.info("\n" + str(confusion_matrix(y_test, y_pred)))
+                logger.info("Test Classification Report:")
                 logger.info("\n" + classification_report(y_test, y_pred))
         else:
             logger.warning("scikit-learn metrics not available; skipping detailed report")
@@ -276,9 +280,23 @@ def main(args: argparse.Namespace) -> None:
         if X_val is not None:
             val_loss, val_acc = model.evaluate(X_val, y_val_cat, verbose=0)
             logger.info("Validation accuracy: %.4f", val_acc)
+            if classification_report is not None:
+                y_val_pred = model.predict(X_val)
+                y_val_pred_classes = np.argmax(y_val_pred, axis=1)
+                logger.info("Validation Confusion Matrix:")
+                logger.info("\n" + str(confusion_matrix(y_val, y_val_pred_classes)))
+                logger.info("Validation Classification Report:")
+                logger.info("\n" + classification_report(y_val, y_val_pred_classes))
         if X_test is not None:
             test_loss, test_acc = model.evaluate(X_test, y_test_cat, verbose=0)
             logger.info("Test accuracy: %.4f", test_acc)
+            if classification_report is not None:
+                y_test_pred = model.predict(X_test)
+                y_test_pred_classes = np.argmax(y_test_pred, axis=1)
+                logger.info("Test Confusion Matrix:")
+                logger.info("\n" + str(confusion_matrix(y_test, y_test_pred_classes)))
+                logger.info("Test Classification Report:")
+                logger.info("\n" + classification_report(y_test, y_test_pred_classes))
         # Save weights
         if args.save_weights:
             model.save(args.save_weights)
@@ -304,6 +322,7 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=20, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for deep models')
     parser.add_argument('--save_weights', help='Path to save trained model weights')
+    parser.add_argument('--load_weights', help='Path to load pre-trained model weights')
     parser.add_argument('--num_letters', type=int, help='Limit training to the first N letters alphabetically (A, B, C, ...). If not specified, uses the reduced label set by default.')
     parser.add_argument('--letters', help='Comma-separated gesture labels to include, e.g. A,B,C,D,Y. Overrides --num_letters if specified.')
 

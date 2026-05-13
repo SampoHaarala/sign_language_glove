@@ -79,6 +79,8 @@ import shutil
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from sqlalchemy import label
+
 import gesture_subset_abcd_y as gesture_subset
 import numpy as np
 
@@ -305,14 +307,27 @@ def assess_sample(sample: np.ndarray, label: str | None, ref_mean: Dict[str, np.
         length = len(sample)
         if abs(length - ref_length) > ref_length * length_tol:
             return False, f"length mismatch ({length} vs {ref_length:.1f})"
+        
     # Check outlier distance
     if label and label in ref_mean:
         feat = extract_features(sample)
         mu = ref_mean[label]
         sigma = ref_std[label]
-        # Standardised distance (Mahalanobis with diagonal covariance)
+
+        # Prevent tiny sigma from exploding the distance
+        sigma_floor = 0.05   # good starting point for normalized 0–1 data
+        sigma = np.maximum(sigma, sigma_floor)
+
+        # Robust standardized difference
         z = (feat - mu) / sigma
-        dist = float(math.sqrt(float((z * z).sum())))
+
+        # Clip extreme z-values so one weird feature doesn't dominate everything
+        z = np.clip(z, -5.0, 5.0)
+
+        # Use RMS instead of sqrt(sum), so distance does not grow just because
+        # you have more sensors/features
+        dist = float(np.sqrt(np.mean(z * z)))
+
         if dist > distance_threshold:
             return False, f"outlier (distance {dist:.2f} > {distance_threshold})"
     return True, "ok"
@@ -404,7 +419,7 @@ def main() -> None:
     parser.add_argument("--min_variation", type=float, default=0.05, help="Minimum mean absolute variation across sensors (default 0.05)")
     parser.add_argument("--constant_tol", type=float, default=1e-6, help="Variance threshold to detect constant sensors (default 1e-6)")
     parser.add_argument("--length_tol", type=float, default=0.25, help="Allowed fractional deviation from reference length (default 0.25)")
-    parser.add_argument("--distance_threshold", type=float, default=10.0, help="Maximum z-score distance from reference features (default 10.0)")
+    parser.add_argument("--distance_threshold", type=float, default=3.0, help="Maximum z-score distance from reference features (default 10.0)")
     parser.add_argument("--letters", help="Comma-separated gesture labels to clean, e.g. A,B,C,D,Y. Defaults to the reduced gesture subset.")
     args = parser.parse_args()
     

@@ -140,39 +140,63 @@ def read_sensor_line(line: str) -> list[float] | None:
     Adjust this function if your ESP32 uses a different output format.
     """
     parts = [p.strip() for p in line.split(",")]
-    if len(parts) != 6:
+    expected_len = 1 + 5  # counter + sensors
+    if len(parts) != expected_len:
         return None
     try:
-        # Skip the counter (first value) and take the 9 sensor values
-        values = [float(p) for p in parts[1:]]
-        return values
+        return [float(p) for p in parts[1:]]
     except ValueError:
         return None
+    
+def normalize_static(rows: list[list[float]]) -> list[list[float]]:
+    # Fallback: clip to 0–4065 and divide by 4065
+    max_adc = 4065.0
+    return [[max(0.0, min(val, max_adc)) / max_adc for val in row] for row in rows]
 
 
-def normalize_data(rows: list[list[float]]) -> list[list[float]]:
-    """Normalize sensor data to [0, 1] using a fixed ADC range.
+def compute_calibration_range(rows: list[list[float]], window_size: int = 8) -> tuple[list[float], list[float]]:
+    """Compute per-sensor min/max values from calibration recordings.
 
-    The values are assumed to be raw ADC readings in the interval
-    [0, 4065]. This fixed-range normalization helps preserve amplitude
-    differences between sensors while mapping everything into [0, 1].
-
-    Args:
-        rows: List of sensor readings, each row is [sensor1, sensor2, ..., sensor9]
-
-    Returns:
-        Normalized data with same structure
+    Rather than using a single extreme reading, this computes the average
+    of the smallest and largest windows of values. That reduces the
+    effect of one noisy low or high sample during calibration.
     """
+    if not rows:
+        return [0.0] * 9, [4065.0] * 9
+
+    sensor_count = len(rows[0])
+    min_vals: list[float] = []
+    max_vals: list[float] = []
+    for index in range(sensor_count):
+        values = sorted(row[index] for row in rows)
+        if len(values) <= window_size:
+            min_vals.append(sum(values) / len(values))
+            max_vals.append(sum(values) / len(values))
+            continue
+
+        min_vals.append(sum(values[:window_size]) / window_size)
+        max_vals.append(sum(values[-window_size:]) / window_size)
+
+    return min_vals, max_vals
+
+
+def normalize_data(rows: list[list[float]], min_vals: list[float] | None = None, max_vals: list[float] | None = None) -> list[list[float]]:
+    """Normalize sensor data to [0, 1] using calibration bounds or fixed ADC range."""
     if not rows:
         return rows
 
-    max_adc = 4065.0
+    if min_vals is None or max_vals is None:
+        return normalize_static(rows)
+
     normalized_rows: list[list[float]] = []
     for row in rows:
-        normalized_row = []
-        for val in row:
-            clipped = max(0.0, min(val, max_adc))
-            normalized_row.append(clipped / max_adc)
+        normalized_row: list[float] = []
+        for value, min_value, max_value in zip(row, min_vals, max_vals):
+            if max_value <= min_value:
+                normalized_row.append(0.0)
+            else:
+                normalized = (value - min_value) / (max_value - min_value)
+                normalized_row.append(max(0.0, min(1.0, normalized)))
         normalized_rows.append(normalized_row)
 
     return normalized_rows
@@ -187,12 +211,22 @@ class DataCollectorGUI:
     sensor reader thread to obtain incoming data.
     """
 
-    def __init__(self, ser, subject_id: str, session_dir: Path, repeat_count: int, record_seconds: float = 3.0, letters=None):
+    def __init__(
+        self,
+        ser,
+        subject_id: str,
+        session_dir: Path,
+        repeat_count: int,
+        record_seconds: float = 3.0,
+        calibration_seconds: float | None = None,
+        letters=None,
+    ):
         self.ser = ser
         self.subject_id = subject_id
         self.session_dir = session_dir
         self.repeat_count = repeat_count
         self.record_seconds = record_seconds
+        self.calibration_duration = calibration_seconds if calibration_seconds is not None else record_seconds
         self.letters = letters if letters is not None else gesture_subset.get_reduced_gesture_set()
         self.root = tk.Tk()
         self.root.title("ASL Data Collector (Normalized)")
@@ -238,6 +272,10 @@ class DataCollectorGUI:
             "#7f7f7f",
             "#bcbd22",
         ]
+        self.calibration_open_data: list[list[float]] = []
+        self.calibration_closed_data: list[list[float]] = []
+        self.min_sensor_values: list[float] | None = None
+        self.max_sensor_values: list[float] | None = None
         # Sensor reader thread
         self.reader = SensorReader(ser)
         self.reader.start()
@@ -341,6 +379,48 @@ class DataCollectorGUI:
         self.plot_canvas.create_text(width / 2, height - 20, text="Time (seconds)", fill="#000", font=("Arial", 8))
         self.plot_canvas.create_text(60, margin + 10, text="Normalized sensor values", fill="#000", font=("Arial", 8), anchor="w")
 
+    def run_calibration(self) -> None:
+        """Run open-hand and closed-fist calibration before actual recordings."""
+        self.progress_label.config(text="Calibration 1/2: Open palm")
+        self.letter_label.config(text="Calibration: open your hand")
+        self.canvas.config(image="")
+        self.status_label.config(text=f"Hold a straight open palm for {self.calibration_duration:.0f} seconds...")
+        self.root.after(100, lambda: self.record_calibration_pose("open palm", self._on_open_palm_calibrated))
+
+    def _on_open_palm_calibrated(self, open_data: list[list[float]]) -> None:
+        self.calibration_open_data = open_data
+        self.progress_label.config(text="Calibration 2/2: Closed fist")
+        self.letter_label.config(text="Calibration: make a tight fist")
+        self.status_label.config(text=f"Hold a tight fist for {self.calibration_duration:.0f} seconds...")
+        self.root.after(100, lambda: self.record_calibration_pose("closed fist", self._on_closed_fist_calibrated))
+
+    def _on_closed_fist_calibrated(self, closed_data: list[list[float]]) -> None:
+        self.calibration_closed_data = closed_data
+        all_calibration_data = self.calibration_open_data + self.calibration_closed_data
+        self.min_sensor_values, self.max_sensor_values = compute_calibration_range(all_calibration_data)
+        self.progress_label.config(text="Calibration complete")
+        self.status_label.config(text="Calibration saved. Starting gesture recording...")
+        self.letter_label.config(text="")
+        self.canvas.config(image="")
+        self.root.after(1000, self.next_sample)
+
+    def record_calibration_pose(self, pose_name: str, on_complete) -> None:
+        """Capture raw sensor readings for a calibration pose."""
+        start_time = time.time()
+        raw_data: list[list[float]] = []
+        while time.time() - start_time < self.calibration_duration:
+            line = self.reader.get_line(timeout=0.05)
+            if self.reader.exception is not None:
+                self.status_label.config(text=f"Serial error: {self.reader.exception}")
+                return
+            if line:
+                values = read_sensor_line(line)
+                if values is not None:
+                    raw_data.append(values)
+        if not raw_data:
+            self.status_label.config(text=f"No sensor data collected for {pose_name}. Using default calibration.")
+        on_complete(raw_data)
+
     def on_close(self) -> None:
         """Handle window close event by stopping the sensor reader."""
         if messagebox.askokcancel("Quit", "Do you want to quit?"):
@@ -370,10 +450,10 @@ class DataCollectorGUI:
         self.root.after(3000, lambda: self.start_recording(letter, trial))
 
     def on_start_button(self) -> None:
-        """Handle the start button press and begin the recording loop."""
+        """Handle the start button press and begin calibration."""
         self.start_button.config(state="disabled")
-        self.status_label.config(text="Session started. Showing first sign...")
-        self.root.after(100, self.next_sample)
+        self.status_label.config(text="Starting calibration...")
+        self.root.after(100, self.run_calibration)
 
     def start_recording(self, letter: str, trial: int) -> None:
         """Begin the 3-second recording period for the current sign."""
@@ -402,7 +482,7 @@ class DataCollectorGUI:
 
         # Normalize the sensor data
         if raw_data:
-            normalized_data = normalize_data(raw_data)
+            normalized_data = normalize_data(raw_data, self.min_sensor_values, self.max_sensor_values)
         else:
             normalized_data = []
 
@@ -434,6 +514,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--letters", help="Comma-separated gesture labels to record, e.g. A,B,C,D,Y. Defaults to the reduced gesture subset.")
     parser.add_argument("--session", required=True, help="Directory to store session data")
     parser.add_argument("--baud", type=int, default=115200, help="Baud rate for serial connection (default 115200)")
+    parser.add_argument("--calibration_seconds", type=float, default=3.0, help="Seconds to record each calibration pose (default 3)")
     return parser.parse_args()
 
 
@@ -458,7 +539,14 @@ def main() -> None:
         allowed_letters = gesture_subset.get_reduced_gesture_set()
         print(f"Recording gesture subset: {', '.join(allowed_letters)}")
     # Show UI
-    gui = DataCollectorGUI(ser, args.subject, session_dir, args.repeats, letters=allowed_letters)
+    gui = DataCollectorGUI(
+        ser,
+        args.subject,
+        session_dir,
+        args.repeats,
+        calibration_seconds=args.calibration_seconds,
+        letters=allowed_letters,
+    )
     gui.run()
     # Close serial port on exit
     ser.close()
